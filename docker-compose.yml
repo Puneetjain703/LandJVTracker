@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: land-jv-tracker-postgres
+    environment:
+      POSTGRES_DB: land_jv_tracker
+      POSTGRES_USER: land_jv
+      POSTGRES_PASSWORD: land_jv
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+volumes:
+  postgres-data:
+
