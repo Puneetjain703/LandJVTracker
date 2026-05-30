@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from backend.app import models
 from backend.app.config import get_settings
-from backend.app.services.ingestion import load_dedupe_context, normalize_asset_type, queue_payload
+from backend.app.services.asset_ingestor import ingest_or_queue_payload
+from backend.app.services.ingestion import load_dedupe_context, normalize_asset_type
 from backend.app.services.notion_processor import process_notion_payload
 
 
@@ -308,7 +309,7 @@ def sync_notion_to_queue(db: Session) -> dict[str, Any]:
                 skipped += 1
                 continue
             payload = _map_page(page)
-            if queue_payload(
+            action, _asset = ingest_or_queue_payload(
                 db,
                 source="notion",
                 source_uid=source_uid,
@@ -316,7 +317,8 @@ def sync_notion_to_queue(db: Session) -> dict[str, Any]:
                 payload=payload,
                 created_by_source=settings.notion_source_name,
                 dedupe_context=dedupe_context,
-            ):
+            )
+            if action in {"created", "queued"}:
                 queued += 1
             else:
                 skipped += 1
@@ -392,6 +394,9 @@ def sync_notion_project_page_to_queue(
         for related_id in dict.fromkeys(related_ids):
             seen_ids.add(related_id)
             fetched += 1
+            if (source, related_id) in dedupe_context["source_uids"]:
+                skipped += 1
+                continue
             page = client.pages.retrieve(page_id=related_id)
             payload = _map_related_page(
                 client,
@@ -400,7 +405,7 @@ def sync_notion_project_page_to_queue(
                 source_name=source_name,
                 default_asset_type=default_asset_type,
             )
-            if queue_payload(
+            action, _asset = ingest_or_queue_payload(
                 db,
                 source=source,
                 source_uid=related_id,
@@ -408,7 +413,8 @@ def sync_notion_project_page_to_queue(
                 payload=payload,
                 created_by_source=source_name,
                 dedupe_context=dedupe_context,
-            ):
+            )
+            if action in {"created", "queued"}:
                 queued += 1
             else:
                 skipped += 1

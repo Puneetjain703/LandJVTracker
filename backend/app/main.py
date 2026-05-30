@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import shutil
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
-from fastapi.responses import Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -25,23 +26,32 @@ from backend.app.schemas import (
     AssetCreate,
     AssetOut,
     AssetUpdate,
+    BulkAssetDeleteRequest,
     BulkApprovalDecision,
+    CopilotApplyRequest,
     ImportResult,
     LoginRequest,
     LoginResponse,
 )
 from backend.app.services.ai_assistant import answer_question
 from backend.app.services.ai_db_agent import apply_agent_actions, plan_agent_actions
-from backend.app.services.assets import asset_to_dict, create_asset, filter_assets, update_asset
+from backend.app.services.asset_ingestor import create_asset_from_ingested_payload
+from backend.app.services.assets import (
+    asset_to_dict,
+    asset_to_summary_dict,
+    create_asset,
+    filter_asset_summaries,
+    filter_assets,
+    update_asset,
+)
 from backend.app.services.excel_importer import import_excel_to_queue
 from backend.app.services.exporter import build_export_workbook
 from backend.app.services.google_sheets_sync import sync_google_sheets_to_queue
+from backend.app.services.property_copilot import apply_copilot_actions, plan_copilot_message, save_uploads
 from backend.app.services.source_sync import sync_all_sources, sync_notion_project_sources
 
 
 app = FastAPI(title="Land and JV Tracker API", version="0.1.0")
-
-ALLOWED_ASSET_FIELDS = set(AssetCreate.model_fields)
 
 
 async def schedule_sync_loop() -> None:
@@ -136,8 +146,15 @@ def get_assets(
     status: str | None = None,
     owner_id: int | None = None,
     broker_id: int | None = None,
+    contact_id: int | None = None,
+    relationship_type: str | None = None,
     workability_rating: int | None = None,
     approval_status: str | None = None,
+    search: str | None = None,
+    summary: bool = False,
+    limit: int = Query(default=500, ge=1, le=700),
+    offset: int = Query(default=0, ge=0),
+    sort: str = "updated_desc",
     db: Session = Depends(get_db),
     _: str = Depends(get_current_user),
 ) -> list[dict[str, Any]]:
@@ -150,10 +167,52 @@ def get_assets(
         "status": status,
         "owner_id": owner_id,
         "broker_id": broker_id,
+        "contact_id": contact_id,
+        "relationship_type": relationship_type,
         "workability_rating": workability_rating,
         "approval_status": approval_status,
     }
-    return [asset_to_dict(asset) for asset in filter_assets(db, filters)]
+    assets = filter_assets(db, filters, summary=summary, limit=limit, offset=offset, search=search, sort=sort)
+    mapper = asset_to_summary_dict if summary else asset_to_dict
+    return [mapper(asset) for asset in assets]
+
+
+@app.get("/assets/summary")
+def get_asset_summaries(
+    asset_type: str | None = None,
+    district: str | None = None,
+    tehsil: str | None = None,
+    locality: str | None = None,
+    source: str | None = None,
+    status: str | None = None,
+    owner_id: int | None = None,
+    broker_id: int | None = None,
+    contact_id: int | None = None,
+    relationship_type: str | None = None,
+    workability_rating: int | None = None,
+    approval_status: str | None = None,
+    search: str | None = None,
+    limit: int = Query(default=500, ge=1, le=700),
+    offset: int = Query(default=0, ge=0),
+    sort: str = "updated_desc",
+    db: Session = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    filters = {
+        "asset_type": asset_type,
+        "district": district,
+        "tehsil": tehsil,
+        "locality": locality,
+        "source": source,
+        "status": status,
+        "owner_id": owner_id,
+        "broker_id": broker_id,
+        "contact_id": contact_id,
+        "relationship_type": relationship_type,
+        "workability_rating": workability_rating,
+        "approval_status": approval_status,
+    }
+    return filter_asset_summaries(db, filters, limit=limit, offset=offset, search=search, sort=sort)
 
 
 @app.get("/assets/{asset_id}", response_model=AssetOut)
@@ -176,6 +235,42 @@ def get_asset(asset_id: int, db: Session = Depends(get_db), _: str = Depends(get
     return asset_to_dict(asset)
 
 
+@app.delete("/assets/{asset_id}")
+def delete_asset(asset_id: int, db: Session = Depends(get_db), _: str = Depends(get_current_user)) -> dict[str, Any]:
+    asset = db.get(models.Asset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    asset_code = asset.asset_code
+    title = asset.title
+    db.delete(asset)
+    db.commit()
+    return {"status": "deleted", "asset_id": asset_id, "asset_code": asset_code, "title": title}
+
+
+@app.post("/assets/bulk-delete")
+def bulk_delete_assets(
+    payload: BulkAssetDeleteRequest,
+    db: Session = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> dict[str, Any]:
+    deleted: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for asset_id in payload.asset_ids:
+        asset = db.get(models.Asset, asset_id)
+        if not asset:
+            failed.append({"asset_id": asset_id, "error": "Asset not found"})
+            continue
+        deleted.append({"asset_id": asset.id, "asset_code": asset.asset_code, "title": asset.title})
+        db.delete(asset)
+    db.commit()
+    return {
+        "deleted_count": len(deleted),
+        "failed_count": len(failed),
+        "deleted": deleted,
+        "failed": failed,
+    }
+
+
 @app.post("/assets/{asset_id}/contacts")
 def add_asset_contact(
     asset_id: int,
@@ -185,8 +280,107 @@ def add_asset_contact(
 ) -> dict[str, Any]:
     if not db.get(models.Asset, asset_id):
         raise HTTPException(status_code=404, detail="Asset not found")
+    contact_id = payload.get("contact_id")
+    contact = db.get(models.Contact, int(contact_id)) if contact_id else None
+    if not contact:
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Contact name or contact_id is required")
+        contact = None
+        if payload.get("email"):
+            contact = db.scalar(select(models.Contact).where(models.Contact.email == payload["email"]))
+        if not contact and payload.get("phone"):
+            contact = db.scalar(select(models.Contact).where(models.Contact.phone == payload["phone"]))
+        if not contact:
+            contact = db.scalar(
+                select(models.Contact).where(
+                    func.lower(models.Contact.name) == name.lower(),
+                    func.coalesce(models.Contact.company, "") == (payload.get("company") or ""),
+                )
+            )
+        if not contact:
+            contact = models.Contact(
+                name=name,
+                company=payload.get("company"),
+                phone=payload.get("phone"),
+                whatsapp=payload.get("whatsapp"),
+                email=payload.get("email"),
+                notes=payload.get("notes"),
+            )
+            db.add(contact)
+            db.flush()
+        else:
+            for field in ["company", "phone", "whatsapp", "email", "notes"]:
+                if payload.get(field) and not getattr(contact, field):
+                    setattr(contact, field, payload[field])
+    relationship_type = payload.get("relationship_type") or payload.get("role") or "related"
+    existing_link = db.scalar(
+        select(models.AssetContact).where(
+            models.AssetContact.asset_id == asset_id,
+            models.AssetContact.contact_id == contact.id,
+            models.AssetContact.relationship_type == relationship_type,
+        )
+    )
+    if existing_link:
+        if payload.get("relationship_notes"):
+            existing_link.notes = payload["relationship_notes"]
+        db.commit()
+        return {"id": existing_link.id, "contact_id": contact.id, "name": contact.name}
+    link = models.AssetContact(
+        asset_id=asset_id,
+        contact_id=contact.id,
+        relationship_type=relationship_type,
+        notes=payload.get("relationship_notes"),
+    )
+    db.add(link)
+    db.commit()
+    return {"id": link.id, "contact_id": contact.id, "name": contact.name}
+
+
+@app.get("/people")
+def people(
+    query: str | None = None,
+    relationship_type: str | None = None,
+    db: Session = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    stmt = select(models.Contact).options(selectinload(models.Contact.asset_links)).order_by(models.Contact.name)
+    if query:
+        like = f"%{query}%"
+        stmt = stmt.where(
+            models.Contact.name.ilike(like)
+            | models.Contact.company.ilike(like)
+            | models.Contact.phone.ilike(like)
+            | models.Contact.email.ilike(like)
+        )
+    if relationship_type:
+        stmt = stmt.join(models.AssetContact).where(models.AssetContact.relationship_type == relationship_type)
+    rows = []
+    for contact in db.scalars(stmt).unique().all():
+        roles = sorted({link.relationship_type for link in contact.asset_links})
+        rows.append(
+            {
+                "id": contact.id,
+                "name": contact.name,
+                "company": contact.company,
+                "phone": contact.phone,
+                "whatsapp": contact.whatsapp,
+                "email": contact.email,
+                "notes": contact.notes,
+                "roles": roles,
+                "asset_count": len({link.asset_id for link in contact.asset_links}),
+            }
+        )
+    return rows
+
+
+@app.post("/people")
+def create_person(payload: dict[str, Any], db: Session = Depends(get_db), _: str = Depends(get_current_user)) -> dict[str, Any]:
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
     contact = models.Contact(
-        name=payload["name"],
+        name=name,
         company=payload.get("company"),
         phone=payload.get("phone"),
         whatsapp=payload.get("whatsapp"),
@@ -194,16 +388,9 @@ def add_asset_contact(
         notes=payload.get("notes"),
     )
     db.add(contact)
-    db.flush()
-    link = models.AssetContact(
-        asset_id=asset_id,
-        contact_id=contact.id,
-        relationship_type=payload.get("relationship_type") or "related",
-        notes=payload.get("relationship_notes"),
-    )
-    db.add(link)
     db.commit()
-    return {"id": link.id, "contact_id": contact.id, "name": contact.name}
+    db.refresh(contact)
+    return {"id": contact.id, "name": contact.name}
 
 
 @app.post("/assets/{asset_id}/documents")
@@ -227,6 +414,20 @@ def add_asset_document(
     db.commit()
     db.refresh(document)
     return {"id": document.id, "document_name": document.document_name}
+
+
+@app.get("/documents/{document_id}/open")
+def open_document(document_id: int, db: Session = Depends(get_db), _: str = Depends(get_current_user)) -> Any:
+    document = db.get(models.AssetDocument, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document.url:
+        return RedirectResponse(document.url)
+    if document.storage_path:
+        path = Path(document.storage_path)
+        if path.exists() and path.is_file():
+            return FileResponse(path, filename=document.document_name or path.name)
+    raise HTTPException(status_code=404, detail="Document file or URL is not available")
 
 
 @app.post("/assets/{asset_id}/updates")
@@ -295,47 +496,16 @@ def _approve_queue_item(
 ) -> models.Asset:
     if item.status != "pending":
         raise HTTPException(status_code=400, detail="Approval item is not pending")
-    asset_payload = {key: value for key, value in payload.items() if key in ALLOWED_ASSET_FIELDS}
-    owner_name = payload.get("owner_name")
-    broker_name = payload.get("broker_name")
-    if owner_name and not asset_payload.get("owner_id"):
-        owner = db.scalar(select(models.Owner).where(models.Owner.name == owner_name))
-        if not owner:
-            owner = models.Owner(name=owner_name)
-            db.add(owner)
-            db.flush()
-        asset_payload["owner_id"] = owner.id
-    if broker_name and not asset_payload.get("broker_id"):
-        broker = db.scalar(select(models.Broker).where(models.Broker.name == broker_name))
-        if not broker:
-            broker = models.Broker(name=broker_name)
-            db.add(broker)
-            db.flush()
-        asset_payload["broker_id"] = broker.id
-    if not asset_payload.get("title"):
+    if not payload.get("title"):
         raise HTTPException(status_code=400, detail="Cannot approve without a title")
-    asset_payload["approval_status"] = "approved"
-    asset = create_asset(db, asset_payload)
-    for document in payload.get("documents", []) or []:
-        db.add(
-            models.AssetDocument(
-                asset_id=asset.id,
-                document_name=document.get("document_name") or document.get("url") or "Imported collateral",
-                document_type=document.get("document_type"),
-                url=document.get("url"),
-                storage_path=document.get("storage_path"),
-                notes=document.get("notes"),
-            )
-        )
-    if payload.get("bottleneck_notes"):
-        db.add(
-            models.AssetUpdate(
-                asset_id=asset.id,
-                update_type="imported_note",
-                update_text=payload["bottleneck_notes"],
-                created_by=user,
-            )
-        )
+    asset = create_asset_from_ingested_payload(
+        db,
+        payload,
+        source=item.source,
+        source_uid=item.source_uid,
+        source_name=item.created_by_source,
+        created_by=user,
+    )
     item.status = "approved"
     item.reviewed_by = user
     item.reviewed_at = datetime.now(timezone.utc)
@@ -498,6 +668,71 @@ def agent_apply(
     user: str = Depends(get_current_user),
 ) -> dict[str, Any]:
     return apply_agent_actions(db, payload.instruction, payload.actions, user=user)
+
+
+@app.post("/copilot/plan")
+def copilot_plan(
+    message: str = Form(...),
+    files: list[UploadFile] | None = File(default=None),
+    db: Session = Depends(get_db),
+    user: str = Depends(get_current_user),
+) -> dict[str, Any]:
+    upload_names = [file.filename for file in files or [] if file.filename]
+    return plan_copilot_message(db, message, upload_names, user=user)
+
+
+@app.post("/copilot/transcribe")
+def copilot_transcribe(
+    files: list[UploadFile] | None = File(default=None),
+    _: str = Depends(get_current_user),
+) -> dict[str, Any]:
+    settings = get_settings()
+    if not settings.openai_api_key:
+        raise HTTPException(status_code=400, detail="OPENAI_API_KEY is required for voice transcription")
+    audio = next((file for file in files or [] if file.filename), None)
+    if not audio:
+        raise HTTPException(status_code=400, detail="Upload a voice note to transcribe")
+    try:
+        from openai import OpenAI
+
+        audio.file.seek(0)
+        audio_bytes = audio.file.read()
+        client = OpenAI(api_key=settings.openai_api_key)
+        transcript = client.audio.transcriptions.create(
+            model=settings.openai_transcription_model,
+            file=(audio.filename or "voice-note.wav", audio_bytes, audio.content_type or "audio/wav"),
+        )
+        text = getattr(transcript, "text", None) or transcript.model_dump().get("text")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Voice transcription failed: {exc}") from exc
+    return {"text": text or "", "filename": audio.filename}
+
+
+@app.post("/copilot/apply")
+def copilot_apply(
+    message: str = Form(...),
+    actions_json: str = Form(...),
+    files: list[UploadFile] | None = File(default=None),
+    db: Session = Depends(get_db),
+    user: str = Depends(get_current_user),
+) -> dict[str, Any]:
+    try:
+        actions = json.loads(actions_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="actions_json must be valid JSON") from exc
+    if not isinstance(actions, list):
+        raise HTTPException(status_code=400, detail="actions_json must be a list of actions")
+    saved_uploads = save_uploads(files)
+    return apply_copilot_actions(db, message=message, actions=actions, saved_uploads=saved_uploads, user=user)
+
+
+@app.post("/copilot/apply-json")
+def copilot_apply_json(
+    payload: CopilotApplyRequest,
+    db: Session = Depends(get_db),
+    user: str = Depends(get_current_user),
+) -> dict[str, Any]:
+    return apply_copilot_actions(db, message=payload.message, actions=payload.actions, user=user)
 
 
 @app.get("/owners")

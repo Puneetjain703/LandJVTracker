@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from html import escape
 from typing import Any
 
@@ -15,6 +16,22 @@ from streamlit_folium import st_folium
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 ASSET_TYPES = ["", "land", "jv", "resale_unit", "commercial", "rental", "brokerage_listing", "other"]
 UPDATE_TYPES = ["note", "price_revision", "status_change", "sold", "follow_up", "site_visit", "legal", "document", "other"]
+CONTACT_ROLES = [
+    "",
+    "broker",
+    "landowner",
+    "possible_partner",
+    "financier",
+    "bank",
+    "buyer",
+    "seller",
+    "developer",
+    "legal_advisor",
+    "architect",
+    "government_contact",
+    "referrer",
+    "related",
+]
 
 
 st.set_page_config(page_title="Land and JV Tracker", layout="wide", initial_sidebar_state="expanded")
@@ -227,6 +244,28 @@ THEME_CSS = """
         height: 6px;
         background: linear-gradient(90deg, #6c7075, var(--silver), var(--gold));
     }
+    .score-block {
+        margin-top: 10px;
+    }
+    .score-block.compact {
+        margin-top: 8px;
+    }
+    .score-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        color: var(--gold-soft);
+        font-size: 0.8rem;
+        font-weight: 750;
+    }
+    .score-row strong {
+        color: #fff;
+        font-weight: 850;
+    }
+    .score-fill.gold {
+        background: linear-gradient(90deg, #dfb75c, #ebd076);
+    }
     .field-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -328,7 +367,7 @@ THEME_CSS = """
         .field-grid { grid-template-columns: 1fr; }
     }
 </style>
-""""""
+"""
 
 
 def apply_theme() -> None:
@@ -380,8 +419,30 @@ def page_hero(kicker: str, title: str, copy: str, chips: list[str] | None = None
 def score_html(label: str, value: Any) -> str:
     score = max(0, min(10, to_int(value)))
     return (
-        f"<div><strong>{label}: {score}/10</strong>"
-        f'<div class="score-track"><div class="score-fill" style="width:{score * 10}%"></div></div></div>'
+        f'<div class="score-block">'
+        f'<div class="score-row"><span>{escape(label)}</span><strong>{score}/10</strong></div>'
+        f'<div class="score-track"><div class="score-fill" style="width:{score * 10}%"></div></div>'
+        f'</div>'
+    )
+
+
+def location_score_html(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        score = max(0.0, min(10.0, float(value)))
+    except (TypeError, ValueError):
+        return ""
+    return (
+        '<div class="score-block compact">'
+        '<div class="score-row">'
+        '<span>Location Score</span>'
+        f'<strong>{score:.1f}/10</strong>'
+        '</div>'
+        '<div class="score-track">'
+        f'<div class="score-fill gold" style="width:{score * 10:.1f}%"></div>'
+        '</div>'
+        '</div>'
     )
 
 
@@ -434,6 +495,46 @@ def api_bytes(method: str, path: str, **kwargs: Any) -> bytes:
     if response.status_code >= 400:
         raise RuntimeError(response.text)
     return response.content
+
+
+def api_form(path: str, data: dict[str, Any], uploads: list[dict[str, Any]] | None = None) -> Any:
+    files = [
+        ("files", (upload["name"], upload["bytes"], upload.get("type") or "application/octet-stream"))
+        for upload in uploads or []
+    ]
+    response = requests.post(f"{API_BASE_URL}{path}", headers=_headers(), data=data, files=files, timeout=180)
+    if response.status_code == 401:
+        st.session_state.pop("token", None)
+        st.error("Session expired. Please log in again.")
+        st.stop()
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", response.text)
+        except Exception:
+            detail = response.text
+        raise RuntimeError(detail)
+    return response.json()
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_get(api_base_url: str, path: str, params_items: tuple[tuple[str, Any], ...], token: str | None) -> Any:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    response = requests.get(f"{api_base_url}{path}", headers=headers, params=dict(params_items), timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+
+def api_get_cached(path: str, params: dict[str, Any] | None = None) -> Any:
+    params = clean_payload(params or {}, keep_zero_fields={"offset"})
+    return cached_get(API_BASE_URL, path, tuple(sorted(params.items())), st.session_state.get("token"))
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def cached_people(api_base_url: str, token: str | None) -> list[dict[str, Any]]:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    response = requests.get(f"{api_base_url}/people", headers=headers, timeout=60)
+    response.raise_for_status()
+    return response.json()
 
 
 def login_page() -> None:
@@ -508,6 +609,7 @@ def compact_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
         "approval_status",
         "owner_name",
         "broker_name",
+        "people_summary",
     ]
     return df[[col for col in columns if col in df.columns]]
 
@@ -606,38 +708,71 @@ def parse_document_lines(text: str) -> list[dict[str, Any]]:
     return documents
 
 
-def asset_filters() -> dict[str, Any]:
-    st.markdown('<div class="section-label">Find the right file fast</div>', unsafe_allow_html=True)
-    with st.container(border=True):
-        c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1, 1])
-        filters = {
-            "asset_type": c1.selectbox("Type", ASSET_TYPES, label_visibility="collapsed"),
-            "district": c2.text_input("District", placeholder="District"),
-            "tehsil": c3.text_input("Tehsil", placeholder="Tehsil"),
-            "locality": c4.text_input("Locality", placeholder="Locality"),
-            "status": c5.text_input("Status", placeholder="Status"),
-        }
-        c6, c7, c8 = st.columns([1, 1, 2])
+def asset_filters() -> tuple[dict[str, Any], str]:
+    st.markdown('<div class="section-label">Find properties</div>', unsafe_allow_html=True)
+    q1, q2, q3 = st.columns([2.4, 1.05, 1.05], gap="small")
+    search = q1.text_input(
+        "Search",
+        placeholder="Search title, code, locality, district, source",
+        label_visibility="collapsed",
+        key="asset_search",
+    )
+    filters: dict[str, Any] = {
+        "asset_type": q2.selectbox("Type", ASSET_TYPES, label_visibility="collapsed"),
+        "approval_status": q3.selectbox(
+            "Approval",
+            ["", "approved", "pending", "rejected"],
+            format_func=lambda value: "Any approval" if value == "" else labelize(value),
+            label_visibility="collapsed",
+        ),
+    }
+    with st.expander("More filters", expanded=False):
+        c1, c2, c3, c4 = st.columns(4)
         filters.update(
             {
-                "source": c6.text_input("Source", placeholder="Source"),
-                "workability_rating": c7.number_input("Minimum workability", min_value=0, max_value=10, value=0),
-                "approval_status": c8.segmented_control(
-                    "Approval",
-                    ["", "approved", "pending", "rejected"],
-                    default="",
-                    format_func=lambda value: "Any approval" if value == "" else labelize(value),
-                ),
+                "district": c1.text_input("District"),
+                "tehsil": c2.text_input("Tehsil"),
+                "locality": c3.text_input("Locality"),
+                "status": c4.text_input("Status"),
             }
         )
-    return {key: value for key, value in filters.items() if value not in ("", 0, None)}
+        c5, c6, c7 = st.columns([1, 1, 1.4])
+        filters["source"] = c5.text_input("Source")
+        filters["workability_rating"] = c6.number_input("Minimum workability", min_value=0, max_value=10, value=0)
+        use_people = c7.checkbox("Filter by person / bank / financier")
+        if use_people:
+            try:
+                people = cached_people(API_BASE_URL, st.session_state.get("token"))
+            except Exception:
+                people = []
+            p1, p2 = st.columns([1.5, 1])
+            person_options = [0] + [person["id"] for person in people]
+            selected_person = p1.selectbox(
+                "Person / financier / bank",
+                person_options,
+                format_func=lambda value: "Any person" if value == 0 else next(
+                    f"{person['name']} ({', '.join(person.get('roles') or ['related'])})"
+                    for person in people
+                    if person["id"] == value
+                ),
+            )
+            selected_role = p2.selectbox(
+                "Role",
+                CONTACT_ROLES,
+                format_func=lambda value: "Any role" if value == "" else labelize(value),
+            )
+            if selected_person:
+                filters["contact_id"] = selected_person
+            if selected_role:
+                filters["relationship_type"] = selected_role
+    return {key: value for key, value in filters.items() if value not in ("", 0, None)}, search.strip()
 
 
 def filter_rows_locally(rows: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
     query = query.strip().lower()
     if not query:
         return rows
-    searchable = ["asset_code", "title", "district", "tehsil", "locality", "area_name", "owner_name", "broker_name", "source"]
+    searchable = ["asset_code", "title", "district", "tehsil", "locality", "area_name", "owner_name", "broker_name", "people_summary", "source"]
     return [
         row
         for row in rows
@@ -645,7 +780,54 @@ def filter_rows_locally(rows: list[dict[str, Any]], query: str) -> list[dict[str
     ]
 
 
-def asset_card(row: dict[str, Any]) -> None:
+def render_delete_confirmation() -> None:
+    pending = st.session_state.get("delete_asset_pending")
+    if not pending:
+        return
+    st.warning(f"Delete asset {pending}? This removes the property file, documents, locations, updates, contacts links, and deal records.")
+    c1, c2 = st.columns([1, 1])
+    if c1.button("Confirm delete", key=f"confirm_delete_{pending}", type="primary", use_container_width=True):
+        try:
+            result = api("DELETE", f"/assets/{pending}")
+            st.success(f"Deleted {result.get('asset_code') or pending}: {result.get('title') or ''}")
+            st.session_state.pop("delete_asset_pending", None)
+            for key in list(st.session_state.keys()):
+                if key.endswith("_open_asset_id") and st.session_state.get(key) == pending:
+                    st.session_state.pop(key, None)
+            cached_get.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+    if c2.button("Cancel", key=f"cancel_delete_{pending}", use_container_width=True):
+        st.session_state.pop("delete_asset_pending", None)
+        st.rerun()
+
+
+def render_bulk_delete_confirmation() -> None:
+    pending = st.session_state.get("bulk_delete_asset_pending") or []
+    pending = [int(asset_id) for asset_id in pending if asset_id]
+    if not pending:
+        return
+    st.warning(f"Delete {len(pending)} selected asset(s)? This removes property files, documents, locations, updates, contact links, and deal records.")
+    c1, c2 = st.columns([1, 1])
+    if c1.button("Confirm bulk delete", key="confirm_bulk_delete", type="primary", use_container_width=True):
+        try:
+            result = api("POST", "/assets/bulk-delete", json={"asset_ids": pending})
+            st.success(f"Deleted {result.get('deleted_count', 0)} asset(s). Failed: {result.get('failed_count', 0)}.")
+            st.session_state.pop("bulk_delete_asset_pending", None)
+            for key in list(st.session_state.keys()):
+                if key.endswith("_open_asset_id") and st.session_state.get(key) in pending:
+                    st.session_state.pop(key, None)
+            cached_get.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+    if c2.button("Cancel bulk delete", key="cancel_bulk_delete", use_container_width=True):
+        st.session_state.pop("bulk_delete_asset_pending", None)
+        st.rerun()
+
+
+def asset_card(row: dict[str, Any], open_state_key: str = "card_open_asset_id") -> None:
     chips = [
         labelize(row.get("asset_type")),
         labelize(row.get("status")),
@@ -653,41 +835,26 @@ def asset_card(row: dict[str, Any]) -> None:
     ]
     chip_html = "".join(f'<span class="chip">{escape(str(chip))}</span>' for chip in chips if chip and chip != "-")
     location = ", ".join(part for part in [row.get("locality"), row.get("tehsil"), row.get("district")] if part) or "Location not set"
-    
-    loc_score = row.get("location_score")
-    score_display = ""
-    if loc_score is not None:
-        try:
-            score_val = float(loc_score)
-            score_display = f"""
-            <div style="margin-top: 8px; font-size: 0.8rem; display: flex; align-items: center; justify-content: space-between;">
-                <span style="color: var(--gold-soft); font-weight: 700;">Location Score</span>
-                <span style="font-weight: 800; color: #fff;">{score_val:.1f}/10</span>
-            </div>
-            <div class="score-track" style="height: 5px; margin-top: 3px; background: #232427; border-radius: 99px; overflow: hidden;">
-                <div class="score-fill" style="width: {score_val * 10}%; height: 5px; background: linear-gradient(90deg, #dfb75c, #ebd076); border-radius: 99px;"></div>
-            </div>
-            """
-        except Exception:
-            pass
-
-    html = f"""
-        <div class="asset-card">
-            <div class="chip-row">{chip_html}</div>
-            <div class="asset-card-title">{escape(clip_text(row.get("title"), 86))}</div>
-            <div class="asset-card-meta">
-                {escape(location)}<br>
-                Owner: {escape(str(row.get("owner_name") or "-"))}<br>
-                Broker: {escape(str(row.get("broker_name") or "-"))}
-            </div>
-            {score_html("Workability", row.get("workability_rating"))}
-            {score_display}
-            <div class="asset-card-footer">
-                <span>Ask {escape(money(row.get("asking_price")))}</span>
-                <span>{escape(labelize(row.get("source")))}</span>
-            </div>
-        </div>
-    """
+    people = row.get("people_summary") or f"Owner: {row.get('owner_name') or '-'} | Broker: {row.get('broker_name') or '-'}"
+    if st.button("Open", key=f"open_card_{open_state_key}_{row.get('id')}", use_container_width=True):
+        st.session_state[open_state_key] = row["id"]
+    if st.button("Delete", key=f"delete_card_{open_state_key}_{row.get('id')}", use_container_width=True):
+        st.session_state["delete_asset_pending"] = row["id"]
+    html = (
+        '<div class="asset-card">'
+        f'<div class="chip-row">{chip_html}</div>'
+        f'<div class="asset-card-title">{escape(clip_text(row.get("title"), 86))}</div>'
+        '<div class="asset-card-meta">'
+        f'{escape(location)}<br>{escape(clip_text(people, 120))}'
+        '</div>'
+        f'{score_html("Workability", row.get("workability_rating"))}'
+        f'{location_score_html(row.get("location_score"))}'
+        '<div class="asset-card-footer">'
+        f'<span>Ask {escape(money(row.get("asking_price")))}</span>'
+        f'<span>{escape(labelize(row.get("source")))}</span>'
+        '</div>'
+        '</div>'
+    )
     st.markdown(html, unsafe_allow_html=True)
 
 
@@ -698,41 +865,59 @@ def asset_list_page(title: str = "Asset Desk", preset_filters: dict[str, Any] | 
         "Search, compare, open, edit, map, and update properties without hunting through workbook tabs.",
         ["Cards for scanning", "Table for sorting", "Every edit goes to Postgres"],
     )
-    filters = asset_filters()
+    filters, quick_search = asset_filters()
     filters.update(preset_filters or {})
+    page_key = f"{title.lower().replace(' ', '_')}_page"
+    st.session_state.setdefault(page_key, 0)
+    page_size = 30
+    q1, q2, q3 = st.columns([1, 1, 2])
+    view_mode = q1.segmented_control("View", ["Cards", "Table"], default="Cards")
+    sort_mode = q2.selectbox("Sort", ["Newest first", "Workability high", "Price high", "Title A-Z"])
+    sort_map = {
+        "Newest first": "updated_desc",
+        "Workability high": "workability_desc",
+        "Price high": "price_desc",
+        "Title A-Z": "title_asc",
+    }
+    if q3.button("Reset page", use_container_width=True):
+        st.session_state[page_key] = 0
     try:
-        rows = api("GET", "/assets", params=filters)
+        params = {
+            **filters,
+            "limit": page_size + 1,
+            "offset": st.session_state[page_key] * page_size,
+            "search": quick_search,
+            "sort": sort_map[sort_mode],
+        }
+        rows = api_get_cached("/assets/summary", params=params)
     except Exception as exc:
         st.error(str(exc))
         return
-    q1, q2, q3 = st.columns([2, 1, 1])
-    quick_search = q1.text_input("Quick search", placeholder="Search title, code, owner, broker, locality")
-    view_mode = q2.segmented_control("View", ["Cards", "Table"], default="Cards")
-    sort_mode = q3.selectbox("Sort", ["Newest first", "Workability high", "Price high", "Title A-Z"])
-    rows = filter_rows_locally(rows, quick_search)
-    if sort_mode == "Workability high":
-        rows = sorted(rows, key=lambda row: to_int(row.get("workability_rating")), reverse=True)
-    elif sort_mode == "Price high":
-        rows = sorted(rows, key=lambda row: to_float(row.get("asking_price")), reverse=True)
-    elif sort_mode == "Title A-Z":
-        rows = sorted(rows, key=lambda row: str(row.get("title") or "").lower())
-
-    st.caption(f"{len(rows)} matching properties")
+    has_more = len(rows) > page_size
+    rows = rows[:page_size]
+    page_number = st.session_state[page_key] + 1
+    st.caption(f"Page {page_number} · showing {len(rows)} properties")
+    render_delete_confirmation()
+    render_bulk_delete_confirmation()
     df = compact_df(rows)
+    selected_table_ids: list[int] = []
     if rows and view_mode == "Cards":
-        for start in range(0, min(len(rows), 12), 3):
+        for start in range(0, min(len(rows), 9), 3):
             cols = st.columns(3)
             for col, row in zip(cols, rows[start : start + 3]):
                 with col:
-                    asset_card(row)
-        if len(rows) > 12:
-            st.info("Showing first 12 cards. Switch to Table view for the full result set.")
+                    asset_card(row, open_state_key=f"{page_key}_open_asset_id")
+        if len(rows) > 9:
+            st.caption("Showing 9 cards for speed. Use Table view or page controls for more.")
     else:
         if not df.empty:
-            st.dataframe(
+            table_state = st.dataframe(
                 df,
                 use_container_width=True,
                 hide_index=True,
+                key=f"{page_key}_table",
+                on_select="rerun",
+                selection_mode="multi-row",
                 column_config={
                     "asset_code": st.column_config.TextColumn("Code", width="small"),
                     "title": st.column_config.TextColumn("Property", width="large"),
@@ -740,19 +925,115 @@ def asset_list_page(title: str = "Asset Desk", preset_filters: dict[str, Any] | 
                     "workability_rating": st.column_config.ProgressColumn("Workability", min_value=0, max_value=10),
                 },
             )
+            selected_rows = table_state.selection.rows if hasattr(table_state, "selection") else []
+            if selected_rows:
+                selected_table_ids = [rows[index]["id"] for index in selected_rows if 0 <= index < len(rows)]
+                if selected_table_ids:
+                    st.caption(f"{len(selected_table_ids)} selected in table")
         else:
             empty_panel("No matching assets yet. Import or approve leads to build the confirmed database.")
     if rows:
-        selected_id = st.selectbox(
+        open1, open2, open3, open4 = st.columns([2.2, 1, 1, 1])
+        selected_id = open1.selectbox(
             "Open property file",
             [row["id"] for row in rows],
             format_func=lambda i: next(f"{row.get('asset_code') or row['id']} - {row['title']}" for row in rows if row["id"] == i),
         )
-        asset_detail(selected_id)
+        if open2.button("Open selected", use_container_width=True, type="primary"):
+            st.session_state[f"{page_key}_open_asset_id"] = selected_table_ids[0] if selected_table_ids else selected_id
+        if open3.button("Delete selected", use_container_width=True):
+            st.session_state["delete_asset_pending"] = selected_table_ids[0] if selected_table_ids else selected_id
+        if open4.button("Delete table selection", use_container_width=True, disabled=not selected_table_ids):
+            st.session_state["bulk_delete_asset_pending"] = selected_table_ids
+    nav1, nav2, nav3 = st.columns([1, 1, 4])
+    if nav1.button("Previous", disabled=st.session_state[page_key] == 0, use_container_width=True):
+        st.session_state[page_key] = max(0, st.session_state[page_key] - 1)
+        st.rerun()
+    if nav2.button("Next", disabled=not has_more, use_container_width=True):
+        st.session_state[page_key] += 1
+        st.rerun()
+    render_delete_confirmation()
+    render_bulk_delete_confirmation()
+    open_asset_id = st.session_state.get(f"{page_key}_open_asset_id")
+    if open_asset_id:
+        asset_detail(open_asset_id)
 
 
 def brokerage_page() -> None:
     asset_list_page("Brokerage Pipeline", preset_filters={"asset_type": "brokerage_listing"})
+
+
+def people_page() -> None:
+    page_hero(
+        "Relationship map",
+        "People, Banks & Financiers",
+        "Pick a broker, landowner, partner, financier, bank, or referrer and see every property connected to them.",
+        ["Role-based filters", "One person across many assets", "Useful for relationship follow-up"],
+    )
+    c1, c2 = st.columns([1.5, 1])
+    role_filter = c2.selectbox("Role", CONTACT_ROLES, format_func=lambda value: "Any role" if value == "" else labelize(value))
+    query = c1.text_input("Search people", placeholder="Name, company, phone, bank, financier")
+    params = clean_payload({"query": query, "relationship_type": role_filter})
+    try:
+        people = api("GET", "/people", params=params)
+    except Exception as exc:
+        st.error(str(exc))
+        return
+    if people:
+        people_df = pd.DataFrame(people)
+        people_df["roles"] = people_df["roles"].apply(lambda roles: ", ".join(roles or []))
+        st.dataframe(
+            people_df[["id", "name", "company", "phone", "whatsapp", "email", "roles", "asset_count"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+        selected_id = st.selectbox(
+            "Show properties associated with",
+            [person["id"] for person in people],
+            format_func=lambda value: next(
+                f"{person['name']} - {person.get('asset_count', 0)} properties"
+                for person in people
+                if person["id"] == value
+            ),
+        )
+        selected_role = st.selectbox(
+            "Limit property list to role",
+            CONTACT_ROLES,
+            format_func=lambda value: "All roles for this person" if value == "" else labelize(value),
+            key="people_page_role_assets",
+        )
+        asset_params = {"contact_id": selected_id, "limit": 200}
+        if selected_role:
+            asset_params["relationship_type"] = selected_role
+        rows = api_get_cached("/assets/summary", params=asset_params)
+        st.caption(f"{len(rows)} connected properties")
+        if rows:
+            connected_table = st.dataframe(
+                compact_df(rows),
+                use_container_width=True,
+                hide_index=True,
+                key=f"people_connected_{selected_id}",
+                on_select="rerun",
+                selection_mode="single-row",
+            )
+            selected_rows = connected_table.selection.rows if hasattr(connected_table, "selection") else []
+            if selected_rows:
+                idx = selected_rows[0]
+                if 0 <= idx < len(rows):
+                    st.session_state["people_open_asset_id"] = rows[idx]["id"]
+            open_id = st.selectbox(
+                "Open connected property",
+                [row["id"] for row in rows],
+                format_func=lambda i: next(f"{row.get('asset_code') or i} - {row['title']}" for row in rows if row["id"] == i),
+            )
+            if st.button("Open connected property", use_container_width=True, type="primary"):
+                st.session_state["people_open_asset_id"] = open_id
+            if st.session_state.get("people_open_asset_id"):
+                asset_detail(st.session_state["people_open_asset_id"])
+        else:
+            empty_panel("No properties linked to this person with the selected role.")
+    else:
+        empty_panel("No people match this search yet. Add people from any asset's People & Roles tab.")
 
 
 def asset_detail(asset_id: int) -> None:
@@ -778,8 +1059,26 @@ def asset_detail(asset_id: int) -> None:
     m4.metric("Bottleneck", f"{to_int(asset.get('bottleneck_rating'))}/10")
     loc_score = asset.get("location_score")
     m5.metric("Location Rating", f"{float(loc_score):.1f}/10" if loc_score is not None else "N/A")
+    copilot_meta = (asset.get("raw_source") or {}).get("copilot", {}) if isinstance(asset.get("raw_source"), dict) else {}
+    brokerage_economics = copilot_meta.get("brokerage_economics") or {}
+    if not brokerage_economics and asset.get("asset_type") == "brokerage_listing" and asset.get("asking_price"):
+        deal_value = to_float(asset.get("asking_price"))
+        brokerage_economics = {
+            "deal_value": deal_value,
+            "brokerage_percent": 1.0,
+            "estimated_brokerage": deal_value * 0.01,
+            "explicit_margin": None,
+        }
+    pricing_calculation = copilot_meta.get("pricing_calculation") or {}
+    if brokerage_economics:
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Deal value", money(brokerage_economics.get("deal_value") or asset.get("asking_price")))
+        b2.metric("Est. brokerage", money(brokerage_economics.get("estimated_brokerage")))
+        b3.metric("Explicit margin", money(brokerage_economics.get("explicit_margin")))
+    if pricing_calculation:
+        st.caption(f"Price math: {pricing_calculation.get('calculation')} · {pricing_calculation.get('unit_assumptions')}")
 
-    tabs = st.tabs(["Snapshot", "Update Log", "Edit Property", "Map", "Contacts", "Documents", "AI Notes"])
+    tabs = st.tabs(["Snapshot", "Update Log", "Edit Property", "Map", "People & Roles", "Documents", "AI Notes"])
     with tabs[0]:
         left, right = st.columns([1.25, 0.75], gap="large")
         with left:
@@ -892,30 +1191,78 @@ def asset_detail(asset_id: int) -> None:
         else:
             empty_panel("No coordinates saved yet. Add latitude and longitude in Edit Property to unlock map inspection.")
     with tabs[4]:
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
+        contacts = asset.get("contacts") or []
         c1.metric("Owner", asset.get("owner_name") or "-")
         c2.metric("Broker", asset.get("broker_name") or "-")
+        c3.metric("Linked people", len(contacts))
         if asset.get("contacts"):
             st.dataframe(pd.DataFrame(asset["contacts"]), use_container_width=True, hide_index=True)
         else:
-            empty_panel("No contact rows yet.")
+            empty_panel("No people or institutions linked yet.")
+        people = []
+        try:
+            people = api("GET", "/people")
+        except Exception:
+            people = []
         with st.form(f"contact_{asset_id}"):
-            c1, c2, c3 = st.columns(3)
+            c0, c1, c2 = st.columns([1.2, 1, 1])
+            existing_id = c0.selectbox(
+                "Link existing person",
+                [0] + [person["id"] for person in people],
+                format_func=lambda value: "Create new person" if value == 0 else next(
+                    f"{person['name']} ({person.get('company') or 'no company'})"
+                    for person in people
+                    if person["id"] == value
+                ),
+            )
+            role = c1.selectbox("Role on this property", CONTACT_ROLES[1:], index=CONTACT_ROLES[1:].index("related"))
+            phone = c2.text_input("Phone")
+            c3, c4, c5 = st.columns(3)
             contact_payload = {
-                "name": c1.text_input("Contact name"),
-                "relationship_type": c2.text_input("Relationship", value="related"),
-                "phone": c3.text_input("Phone"),
-                "whatsapp": c1.text_input("WhatsApp"),
-                "email": c2.text_input("Email"),
+                "contact_id": existing_id if existing_id else None,
+                "name": c3.text_input("New person / institution name"),
+                "relationship_type": role,
+                "phone": phone,
+                "whatsapp": c4.text_input("WhatsApp"),
+                "email": c5.text_input("Email"),
                 "company": c3.text_input("Company"),
                 "notes": st.text_area("Contact notes"),
+                "relationship_notes": st.text_input("Role notes", placeholder="Example: funding discussion, land title contact, mandate holder"),
             }
-            if st.form_submit_button("Add contact", use_container_width=True) and contact_payload["name"]:
-                api("POST", f"/assets/{asset_id}/contacts", json={k: v for k, v in contact_payload.items() if v})
-                st.rerun()
+            if st.form_submit_button("Link person to property", use_container_width=True):
+                if contact_payload["contact_id"] or contact_payload["name"]:
+                    api("POST", f"/assets/{asset_id}/contacts", json={k: v for k, v in contact_payload.items() if v})
+                    st.rerun()
+                else:
+                    st.warning("Choose an existing person or enter a new name.")
     with tabs[5]:
         if asset.get("documents"):
-            st.dataframe(pd.DataFrame(asset["documents"]), use_container_width=True, hide_index=True)
+            docs = asset["documents"]
+            st.dataframe(
+                pd.DataFrame(docs),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "url": st.column_config.LinkColumn("URL"),
+                    "storage_path": st.column_config.TextColumn("Stored file"),
+                },
+            )
+            st.markdown('<div class="section-label">Open documents</div>', unsafe_allow_html=True)
+            for document in docs:
+                label = document.get("document_name") or f"Document {document.get('id')}"
+                doc_url = document.get("url")
+                storage_path = document.get("storage_path")
+                c1, c2, c3 = st.columns([2, 1, 1])
+                c1.write(label)
+                c2.caption(labelize(document.get("document_type") or "document"))
+                if doc_url:
+                    c3.link_button("Open link", doc_url, use_container_width=True)
+                elif storage_path and Path(storage_path).exists():
+                    with Path(storage_path).open("rb") as handle:
+                        c3.download_button("Open file", handle.read(), file_name=Path(storage_path).name, use_container_width=True)
+                else:
+                    c3.caption("No file/link")
         else:
             empty_panel("No documents linked yet.")
         with st.form(f"document_{asset_id}"):
@@ -1372,6 +1719,237 @@ def ai_agent_page() -> None:
         st.warning("No database edit action was proposed. Try naming an asset ID/code or a very specific property/location.")
 
 
+def action_label(action: dict[str, Any]) -> str:
+    name = labelize(action.get("action"))
+    if action.get("asset_id"):
+        return f"{name} · Asset {action['asset_id']}"
+    if action.get("fields", {}).get("title"):
+        return f"{name} · {action['fields']['title']}"
+    return name
+
+
+def copilot_context(latest_message: str) -> str:
+    turns = st.session_state.get("copilot_chat", [])[-8:]
+    if not turns:
+        return latest_message
+    lines = [
+        "Continue this property database conversation. Use the latest user reply to refine the existing plan; do not make the user restate earlier details.",
+        "",
+        "Conversation so far:",
+    ]
+    for turn in turns:
+        role = "User" if turn.get("role") == "user" else "Copilot"
+        lines.append(f"{role}: {turn.get('content') or ''}")
+        plan = turn.get("plan") or {}
+        if role == "Copilot" and plan:
+            if plan.get("answer"):
+                lines.append(f"Copilot answer: {plan['answer']}")
+            if plan.get("actions"):
+                action_summary = [
+                    {
+                        "action": action.get("action"),
+                        "asset_id": action.get("asset_id"),
+                        "fields": action.get("fields"),
+                        "missing_fields": action.get("missing_fields"),
+                        "questions": action.get("questions"),
+                    }
+                    for action in plan.get("actions", [])[:6]
+                ]
+                lines.append(f"Current proposed actions JSON: {json.dumps(action_summary, default=str)}")
+    lines.extend(["", f"Latest user reply: {latest_message}"])
+    return "\n".join(lines)
+
+
+def render_copilot_plan(plan: dict[str, Any], *, message_index: int, uploads: list[dict[str, Any]] | None = None) -> None:
+    if plan.get("answer"):
+        st.info(plan["answer"])
+    if plan.get("upload_names"):
+        st.caption("Uploads in this turn: " + ", ".join(plan["upload_names"]))
+    if plan.get("matched_assets"):
+        with st.expander("Matched property files", expanded=False):
+            st.dataframe(compact_df(plan["matched_assets"]), use_container_width=True, hide_index=True)
+
+    actions = plan.get("actions") or []
+    followups = [action for action in actions if action.get("action") == "ask_followup"]
+    for action in followups:
+        for question in action.get("questions") or []:
+            st.warning(question)
+
+    actionable = [action for action in actions if action.get("action") not in {"answer", "ask_followup", "missing_info_report"}]
+    if actions:
+        with st.expander("Proposed database actions", expanded=bool(actionable)):
+            for action in actions:
+                st.markdown(f"**{escape(action_label(action))}**")
+                st.json(action)
+                if action.get("missing_fields"):
+                    st.caption("Missing recommended fields: " + ", ".join(action["missing_fields"]))
+
+    if not actionable:
+        return
+
+    editor_key = f"copilot_actions_json_{message_index}"
+    default_json = json.dumps(actions, indent=2, default=str)
+    if editor_key not in st.session_state:
+        st.session_state[editor_key] = default_json
+    edited_json = st.text_area(
+        "Edit actions before applying",
+        key=editor_key,
+        height=180,
+    )
+    if st.button("Apply these actions", key=f"copilot_apply_{message_index}", use_container_width=True, type="primary"):
+        try:
+            parsed_actions = json.loads(edited_json)
+            result = api_form(
+                "/copilot/apply",
+                {
+                    "message": st.session_state.get("copilot_chat", [{}])[message_index].get("source_message", ""),
+                    "actions_json": json.dumps(parsed_actions),
+                },
+                uploads or [],
+            )
+            st.success(f"Applied {result['applied_count']} action(s). Failed: {result['failed_count']}.")
+            if result.get("applied"):
+                st.dataframe(pd.DataFrame(result["applied"]), use_container_width=True, hide_index=True)
+            if result.get("failed"):
+                st.error("Some actions failed.")
+                st.dataframe(pd.DataFrame(result["failed"]), use_container_width=True, hide_index=True)
+            st.session_state["copilot_chat"].append(
+                {
+                    "role": "assistant",
+                    "content": f"Applied {result['applied_count']} action(s). Failed: {result['failed_count']}.",
+                    "result": result,
+                }
+            )
+            cached_get.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+
+def copilot_page() -> None:
+    page_hero(
+        "Interactive property brain",
+        "Property Copilot",
+        "Drop in messy notes, documents, photos, price changes, people, or follow-up instructions. The copilot structures it into database actions and waits for your approval.",
+        ["Create properties", "Attach files", "Update ratings", "Ask what needs attention"],
+    )
+    st.markdown(
+        """
+        <div class="note-panel">
+            The copilot can read the database, draft new property entries, update existing ones, add timeline notes,
+            attach uploaded collateral, and ask follow-up questions when important details are missing.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    examples = [
+        "Create a new JV opportunity near Ajmer Road, 12 bigha, owner Mr Sharma, broker Rakesh, asking 18 cr. Title unclear, ask me what else is needed.",
+        "For LJV-00544 attach these files and add a note that Dad reviewed it today; workability should be 6.",
+        "Which brokerage properties are missing owner, price, location, or financier details?",
+    ]
+    with st.expander("Example prompts", expanded=False):
+        for example in examples:
+            st.code(example)
+
+    st.session_state.setdefault("copilot_chat", [])
+    st.session_state.setdefault("copilot_upload_nonce", 0)
+    st.session_state.setdefault("copilot_voice_nonce", 0)
+
+    uploads = st.file_uploader(
+        "Attach collateral, photos, maps, notes, title docs, brochures, or PDFs",
+        accept_multiple_files=True,
+        key=f"copilot_file_uploads_{st.session_state['copilot_upload_nonce']}",
+    )
+    upload_payload = [
+        {"name": upload.name, "type": upload.type, "bytes": upload.getvalue()}
+        for upload in uploads or []
+    ]
+    controls = st.columns([1, 1, 2])
+    if controls[0].button("Clear conversation", use_container_width=True):
+        for key in list(st.session_state.keys()):
+            if key.startswith("copilot_actions_json_"):
+                st.session_state.pop(key, None)
+        st.session_state["copilot_chat"] = []
+        st.session_state["copilot_upload_nonce"] += 1
+        st.rerun()
+    if controls[1].button("Clear uploads", use_container_width=True):
+        st.session_state["copilot_upload_nonce"] += 1
+        st.rerun()
+    if upload_payload:
+        controls[2].caption("Pending upload(s): " + ", ".join(upload["name"] for upload in upload_payload))
+
+    def submit_copilot_message(prompt_text: str) -> None:
+        source_message = copilot_context(prompt_text)
+        st.session_state["copilot_chat"].append({"role": "user", "content": prompt_text})
+        try:
+            plan = api_form("/copilot/plan", {"message": source_message}, upload_payload)
+            assistant_text = plan.get("summary") or "I drafted a database plan."
+            if plan.get("answer") and not plan.get("actions"):
+                assistant_text = plan["answer"]
+            st.session_state["copilot_chat"].append(
+                {
+                    "role": "assistant",
+                    "content": assistant_text,
+                    "plan": plan,
+                    "uploads": upload_payload,
+                    "source_message": source_message,
+                }
+            )
+            if upload_payload:
+                st.session_state["copilot_upload_nonce"] += 1
+            st.rerun()
+        except Exception as exc:
+            st.session_state["copilot_chat"].append({"role": "assistant", "content": f"Copilot error: {exc}"})
+            st.rerun()
+
+    with st.expander("Voice note", expanded=False):
+        voice_note = st.audio_input("Record property note or broker conversation", key=f"copilot_voice_{st.session_state['copilot_voice_nonce']}")
+        vc1, vc2 = st.columns([1, 1])
+        if vc1.button("Transcribe voice", disabled=voice_note is None, use_container_width=True):
+            if voice_note is not None:
+                try:
+                    result = api_form(
+                        "/copilot/transcribe",
+                        {},
+                        [{"name": voice_note.name or "voice-note.wav", "type": voice_note.type or "audio/wav", "bytes": voice_note.getvalue()}],
+                    )
+                    st.session_state["copilot_voice_transcript"] = result.get("text") or ""
+                    st.success("Voice note transcribed. Review it below, then send it to Copilot.")
+                except Exception as exc:
+                    st.error(str(exc))
+        if vc2.button("Clear voice", use_container_width=True):
+            st.session_state.pop("copilot_voice_transcript", None)
+            st.session_state["copilot_voice_nonce"] += 1
+            st.rerun()
+        if st.session_state.get("copilot_voice_transcript"):
+            transcript = st.text_area(
+                "Review voice transcript",
+                key="copilot_voice_transcript",
+                height=130,
+            )
+            if st.button("Send transcript to Copilot", use_container_width=True, type="primary"):
+                submit_copilot_message(transcript)
+
+    for index, turn in enumerate(st.session_state["copilot_chat"]):
+        with st.chat_message(turn.get("role", "assistant")):
+            st.write(turn.get("content") or "")
+            if turn.get("plan"):
+                render_copilot_plan(turn["plan"], message_index=index, uploads=turn.get("uploads") or [])
+            if turn.get("result"):
+                result = turn["result"]
+                if result.get("applied"):
+                    st.dataframe(pd.DataFrame(result["applied"]), use_container_width=True, hide_index=True)
+                if result.get("failed"):
+                    st.dataframe(pd.DataFrame(result["failed"]), use_container_width=True, hide_index=True)
+
+    prompt = st.chat_input("Reply to the copilot or give a new property instruction")
+    if prompt:
+        submit_copilot_message(prompt)
+
+    if not st.session_state["copilot_chat"]:
+        empty_panel("Start with a property note, an update, a cleanup question, or upload files and describe where they belong.")
+
+
 def export_page() -> None:
     page_hero(
         "Safety valve",
@@ -1413,7 +1991,7 @@ def dashboard_page() -> None:
         ["Approve before publish", "Track every update", "Use AI for edits", "Export anytime"],
     )
     try:
-        assets = api("GET", "/assets")
+        assets = api_get_cached("/assets/summary", params={"limit": 700})
     except Exception as exc:
         st.error(str(exc))
         assets = []
@@ -1487,16 +2065,50 @@ def dashboard_page() -> None:
             
         st_folium(fmap, height=380, use_container_width=True)
 
+    st.markdown('<div class="section-label">All properties table</div>', unsafe_allow_html=True)
+    render_bulk_delete_confirmation()
+    if assets:
+        dashboard_df = compact_df(assets)
+        dashboard_table_state = st.dataframe(
+            dashboard_df,
+            use_container_width=True,
+            hide_index=True,
+            key="dashboard_all_assets_table",
+            on_select="rerun",
+            selection_mode="multi-row",
+            height=360,
+            column_config={
+                "asset_code": st.column_config.TextColumn("Code", width="small"),
+                "title": st.column_config.TextColumn("Property", width="large"),
+                "asking_price": st.column_config.NumberColumn("Ask", format="%.0f"),
+                "workability_rating": st.column_config.ProgressColumn("Workability", min_value=0, max_value=10),
+            },
+        )
+        dashboard_selected_rows = dashboard_table_state.selection.rows if hasattr(dashboard_table_state, "selection") else []
+        dashboard_selected_ids = [assets[index]["id"] for index in dashboard_selected_rows if 0 <= index < len(assets)]
+        t1, t2, t3 = st.columns([1, 1, 3])
+        if t1.button("Open first selected", disabled=not dashboard_selected_ids, use_container_width=True):
+            st.session_state["dashboard_open_asset_id"] = dashboard_selected_ids[0]
+        if t2.button("Delete selected rows", disabled=not dashboard_selected_ids, use_container_width=True):
+            st.session_state["bulk_delete_asset_pending"] = dashboard_selected_ids
+        if dashboard_selected_ids:
+            t3.caption(f"{len(dashboard_selected_ids)} selected")
+    else:
+        empty_panel("No confirmed assets yet.")
+
     left, right = st.columns([1.15, 0.85], gap="large")
     with left:
         st.markdown('<div class="section-label">Strongest opportunities</div>', unsafe_allow_html=True)
+        render_delete_confirmation()
         strongest = sorted(assets, key=lambda row: to_int(row.get("workability_rating")), reverse=True)[:6]
         if strongest:
             for start in range(0, len(strongest), 3):
                 cols = st.columns(3)
                 for col, row in zip(cols, strongest[start : start + 3]):
                     with col:
-                        asset_card(row)
+                        asset_card(row, open_state_key="dashboard_open_asset_id")
+        if st.session_state.get("dashboard_open_asset_id"):
+            asset_detail(st.session_state["dashboard_open_asset_id"])
         else:
             empty_panel("Approve or add assets to build your opportunity board.")
     with right:
@@ -1524,7 +2136,7 @@ def main() -> None:
         st.caption(f"Signed in as {st.session_state.get('username', 'internal')}")
         page = st.radio(
             "Workspace",
-            ["Dashboard", "Assets", "Brokerage", "Add / Edit", "Approvals", "Import", "Export", "Sync", "AI Assistant", "AI DB Agent"],
+            ["Dashboard", "Property Copilot", "Assets", "Brokerage", "People", "Add / Edit", "Approvals", "Import", "Export", "Sync"],
         )
         st.divider()
         st.caption("Daily flow: sync, approve, update, export.")
@@ -1535,10 +2147,14 @@ def main() -> None:
     stats_bar()
     if page == "Dashboard":
         dashboard_page()
+    elif page == "Property Copilot":
+        copilot_page()
     elif page == "Assets":
         asset_list_page()
     elif page == "Brokerage":
         brokerage_page()
+    elif page == "People":
+        people_page()
     elif page == "Add / Edit":
         add_edit_page()
     elif page == "Approvals":
@@ -1549,10 +2165,6 @@ def main() -> None:
         export_page()
     elif page == "Sync":
         sync_page()
-    elif page == "AI Assistant":
-        ai_page()
-    elif page == "AI DB Agent":
-        ai_agent_page()
 
 
 if __name__ == "__main__":

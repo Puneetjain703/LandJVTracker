@@ -7,13 +7,14 @@ Production-minded MVP for an internal brokerage, land, JV, resale, RE asset, and
 - FastAPI backend with authenticated endpoints
 - Streamlit MVP frontend
 - PostgreSQL schema for assets, deals, contacts, organizations, brokers, owners, documents, locations, updates, tags, approvals, sync logs, ingestion logs, CRM profiles, match suggestions, and AI query logs
-- Excel import into an approval queue
-- Notion sync from `Pearl Spytech New Projects` into the approval queue
-- Approval/rejection workflow before records appear in the main asset table
+- Excel import with direct asset publishing by default, or optional approval queue review
+- Notion sync from the configured project pages with direct asset publishing by default
+- Approval/rejection workflow remains available when `AUTO_PUBLISH_INGESTED_ASSETS=false`
 - Map coordinates, Google Maps links, and no-key best-effort geocoding through OpenStreetMap Nominatim
 - Read-only AI assistant over retrieved asset rows
 - Placeholder source path for future WhatsApp ingestion
 - CRM matching foundation tables
+- People/institution relationship layer for brokers, landowners, partners, financiers, banks, referrers, and other roles on each asset
 
 Personal WhatsApp account reading is not implemented in this MVP. The schema and approval queue are ready for future `whatsapp` lead extraction.
 
@@ -108,7 +109,7 @@ If `NOTION_DATABASE_ID` is blank, the sync script attempts to find a Notion data
 
 ## Excel import behavior
 
-The importer accepts `.xlsx` and `.xls`, maps likely column names flexibly, stores the original row JSON in `raw_source`, and queues every new row for manual review. Rows missing title or location fields are marked with `needs_manual_review` inside the queued payload.
+The importer accepts `.xlsx` and `.xls`, maps likely column names flexibly, stores the original row JSON in `raw_source`, classifies each row as `land`, `jv`, or `brokerage_listing`, and publishes directly to `assets` when `AUTO_PUBLISH_INGESTED_ASSETS=true`. Set that flag to `false` if you want rows to wait in the approval inbox.
 
 Likely aliases are supported for fields such as title, property, asset type, location, district, tehsil, land area, asking price, legal status, zoning, and bottleneck notes.
 
@@ -120,7 +121,7 @@ Run manually from the UI or from a cron/GitHub Actions-friendly command:
 python scripts/sync_notion.py
 ```
 
-The sync is rerunnable. It uses the Notion page id as `source_uid` and the database constraint `UNIQUE(source, source_uid)` prevents duplicate approval queue entries.
+The sync is rerunnable. It uses each source row/page id plus a property fingerprint to skip repeated assets already in the confirmed database or approval queue.
 
 ## AI assistant
 
@@ -138,6 +139,10 @@ Confirmed records live in the main relational tables, especially `assets`, `asse
 - Use `Export` in the Streamlit app, or `GET /export/excel`, to download a multi-sheet workbook backup.
 
 The export includes confirmed assets, related updates/documents/contacts, the approval queue, import/sync logs, CRM foundation tables, and AI query logs.
+
+## People and roles
+
+Each asset can have multiple linked people or institutions through `contacts` and `asset_contacts`. Use the `People & Roles` tab inside a property file to link brokers, landowners, possible partners, financiers, banks, buyers, sellers, developers, legal advisors, and referrers. The `People` workspace and asset filters can then list all properties associated with a selected person, institution, or role.
 
 ## Schema setup
 
@@ -202,7 +207,7 @@ It reads:
 - Notion project page `Analyze the Property deals and update LRM`, including its Tasks and Notes relations
 - Notion project page `Brokerage New Deals`, including its Tasks and Notes relations
 
-Every imported property goes to `approval_queue` first. The sync checks existing approval items and confirmed assets with a property fingerprint before queueing a new row, so repeated properties are skipped.
+By default, imported properties are auto-classified and inserted into the confirmed `assets` table as land purchase (`land`), brokerage opportunity (`brokerage_listing`), or joint venture (`jv`). Set `AUTO_PUBLISH_INGESTED_ASSETS=false` to send new items to `approval_queue` first. The sync checks existing approval items and confirmed assets with source ids and property fingerprints, so repeated properties are skipped.
 
 For Google Sheets, create a Google Cloud service account, put the JSON path in `GOOGLE_SERVICE_ACCOUNT_FILE` or the raw JSON in `GOOGLE_SERVICE_ACCOUNT_JSON`, and share the sheet with the service account email.
 
@@ -216,7 +221,7 @@ Current Notion source links:
 
 If sync says relation entries are hidden, the project page itself is visible but Notion is not returning the related Task/Note pages to the integration. Open the project page, inspect the Tasks and Notes sections, and make sure those related pages are visible to the `Land/JV/Brokerage Tracker` integration, then rerun Sync.
 
-If `OPENAI_API_KEY` is set, Notion Tasks/Notes are processed with an AI extractor that converts raw page properties and body text into structured approval fields. If it is not set, the listener uses a deterministic fallback parser and still queues the raw source data for manual review.
+If `OPENAI_API_KEY` is set, Notion Tasks/Notes are processed with an AI extractor that converts raw page properties and body text into structured asset fields. If it is not set, the listener uses a deterministic fallback parser and still stores the raw source data.
 
 
 ## AI database agent

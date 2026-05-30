@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from backend.app import models
 from backend.app.config import get_settings
 from backend.app.services.excel_importer import COLUMN_ALIASES
+from backend.app.services.asset_ingestor import ingest_or_queue_payload
 from backend.app.services.ingestion import (
     clean_cell,
     is_blank_row,
@@ -16,7 +17,6 @@ from backend.app.services.ingestion import (
     normalize_asset_type,
     normalize_text,
     parse_coordinates,
-    queue_payload,
     row_uid,
 )
 
@@ -135,7 +135,7 @@ def sync_google_sheets_to_queue(db: Session) -> dict[str, Any]:
                 fetched += 1
                 payload = _row_payload(raw, mapping, source)
                 source_uid = row_uid(source, f"{settings.google_sheet_id}:{tab_name}", row_number, raw)
-                if queue_payload(
+                action, _asset = ingest_or_queue_payload(
                     db,
                     source=source,
                     source_uid=source_uid,
@@ -143,7 +143,8 @@ def sync_google_sheets_to_queue(db: Session) -> dict[str, Any]:
                     payload=payload,
                     created_by_source=f"Google Sheet: {tab_name}",
                     dedupe_context=dedupe_context,
-                ):
+                )
+                if action in {"created", "queued"}:
                     queued += 1
                 else:
                     skipped += 1

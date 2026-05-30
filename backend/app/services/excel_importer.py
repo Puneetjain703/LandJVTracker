@@ -4,10 +4,11 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app import models
+from backend.app.services.asset_ingestor import ingest_or_queue_payload
+from backend.app.services.ingestion import load_dedupe_context
 
 
 COLUMN_ALIASES = {
@@ -137,6 +138,7 @@ def import_excel_to_queue(db: Session, file_path: Path, filename: str) -> dict[s
     log = models.IngestionLog(source="excel", filename=filename, status="running", total_rows=total)
     db.add(log)
     db.flush()
+    dedupe_context = load_dedupe_context(db)
 
     for row_number, row in enumerate(rows, start=2):
         raw = {
@@ -180,29 +182,22 @@ def import_excel_to_queue(db: Session, file_path: Path, filename: str) -> dict[s
             payload["review_reason"] = "Missing title and/or location fields"
 
         source_uid = _row_uid(filename, int(row_number), raw)
-        existing = db.scalar(
-            select(models.ApprovalQueue).where(
-                models.ApprovalQueue.source == "excel",
-                models.ApprovalQueue.source_uid == source_uid,
-            )
+        action, _asset = ingest_or_queue_payload(
+            db,
+            source="excel",
+            source_uid=source_uid,
+            title=payload.get("title") or f"Excel row {row_number + 1}",
+            payload=payload,
+            created_by_source="excel_import",
+            dedupe_context=dedupe_context,
         )
-        if existing:
+        if action in {"created", "queued"}:
+            queued += 1
+        else:
             skipped += 1
-            continue
-        db.add(
-            models.ApprovalQueue(
-                source="excel",
-                source_uid=source_uid,
-                title=payload.get("title") or f"Excel row {row_number + 1}",
-                payload=payload,
-                status="pending",
-                created_by_source="excel_import",
-            )
-        )
-        queued += 1
 
     log.status = "completed"
-    log.created_count = 0
+    log.created_count = queued
     log.review_count = queued
     log.skipped_count = skipped
     db.commit()

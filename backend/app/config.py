@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
+    openai_transcription_model: str = "whisper-1"
 
     notion_api_key: str | None = None
     notion_database_id: str | None = None
@@ -37,6 +38,7 @@ class Settings(BaseSettings):
 
     geocoder_user_agent: str = "land-jv-tracker-internal"
     google_maps_api_key: str | None = None
+    auto_publish_ingested_assets: bool = False
     
     # Scheduling settings (HH:MM format in UTC or local depending on server time)
     sync_schedule_morning: str = "07:00"
@@ -46,4 +48,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

@@ -46,6 +46,46 @@ def normalize_asset_type(value: Any, default: str = "land") -> str:
     return cleaned.replace(" ", "_")
 
 
+def classify_property(payload: dict[str, Any], *, source_name: str | None = None) -> str:
+    """Classify an ingested lead into the three operating buckets."""
+    source_text = normalize_text(source_name or payload.get("created_by_source") or payload.get("source"))
+    text_parts = [
+        source_text,
+        payload.get("title"),
+        payload.get("asset_type"),
+        payload.get("status"),
+        payload.get("locality"),
+        payload.get("area_name"),
+        payload.get("address"),
+        payload.get("bottleneck_notes"),
+        payload.get("legal_status"),
+        payload.get("zoning_status"),
+        payload.get("key_people"),
+        payload.get("raw_source"),
+    ]
+    text = " ".join(normalize_text(part) for part in text_parts if part is not None)
+
+    if "brokerage new deals" in text or "brokerage" in text:
+        return "brokerage"
+    if any(token in text for token in ["mandate", "commission", "listing", "brokerage opportunity"]):
+        return "brokerage"
+    if any(token in text for token in ["resale", "sale opportunity", "seller", "buyer requirement"]):
+        return "brokerage"
+    if any(token in text for token in ["joint venture", "jv", "revenue share", "development agreement"]):
+        return "joint_venture"
+    if any(token in text for token in ["landowner", "developer share", "built up share", "area share"]):
+        return "joint_venture"
+    return "land_purchase"
+
+
+def asset_type_for_classification(classification: str) -> str:
+    if classification == "brokerage":
+        return "brokerage_listing"
+    if classification == "joint_venture":
+        return "jv"
+    return "land"
+
+
 def is_blank_row(raw: dict[str, Any]) -> bool:
     return not any(clean_cell(value) not in (None, 0, 0.0) for value in raw.values())
 
@@ -138,6 +178,12 @@ def load_dedupe_context(db: Session) -> dict[str, set[Any]]:
         else:
             context["fingerprints"].add(dedupe_fingerprint(queued_payload))
     for asset in db.scalars(select(models.Asset)).all():
+        raw_source = asset.raw_source if isinstance(asset.raw_source, dict) else {}
+        ingestion_meta = raw_source.get("_ingestion") if isinstance(raw_source, dict) else {}
+        if isinstance(ingestion_meta, dict) and ingestion_meta.get("source_uid"):
+            context["source_uids"].add((asset.source, ingestion_meta["source_uid"]))
+        if isinstance(raw_source, dict) and raw_source.get("dedupe_fingerprint"):
+            context["fingerprints"].add(raw_source["dedupe_fingerprint"])
         context["fingerprints"].add(
             dedupe_fingerprint(
                 {

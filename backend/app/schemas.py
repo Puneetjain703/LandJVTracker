@@ -100,6 +100,7 @@ class AssetOut(AssetBase):
     owner_name: str | None = None
     broker_name: str | None = None
     contacts: list[dict[str, Any]] = Field(default_factory=list)
+    people_summary: str | None = None
     documents: list[dict[str, Any]] = Field(default_factory=list)
     updates: list[dict[str, Any]] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
@@ -137,6 +138,10 @@ class BulkApprovalDecision(BaseModel):
     notes: str | None = None
 
 
+class BulkAssetDeleteRequest(BaseModel):
+    asset_ids: list[int]
+
+
 class AskRequest(BaseModel):
     question: str
 
@@ -160,6 +165,11 @@ class AgentPlan(BaseModel):
 
 class AgentApplyRequest(BaseModel):
     instruction: str
+    actions: list[dict[str, Any]]
+
+
+class CopilotApplyRequest(BaseModel):
+    message: str
     actions: list[dict[str, Any]]
 
 

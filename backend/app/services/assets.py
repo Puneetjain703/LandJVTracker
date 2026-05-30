@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Float, Select, cast, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from backend.app import models
@@ -26,9 +26,12 @@ def enrich_location(data: dict[str, Any]) -> dict[str, Any]:
     locality = data.get("locality")
     district = data.get("district")
     
+    ingestion_meta = raw.get("_ingestion") if isinstance(raw, dict) else {}
+    skip_geocode = isinstance(ingestion_meta, dict) and ingestion_meta.get("skip_geocode")
+
     if lat and lon:
         data["google_maps_link"] = data.get("google_maps_link") or google_maps_link(lat, lon)
-    elif address:
+    elif address and not skip_geocode:
         address_parts = [
             address,
             locality,
@@ -48,6 +51,8 @@ def enrich_location(data: dict[str, Any]) -> dict[str, Any]:
             
     # Location Scoring
     try:
+        if skip_geocode:
+            return data
         from backend.app.services.geocode import score_location
         score, reason = score_location(
             address=data.get("address"),
@@ -65,8 +70,10 @@ def enrich_location(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-def create_asset(db: Session, payload: AssetCreate | dict[str, Any]) -> models.Asset:
+def create_asset(db: Session, payload: AssetCreate | dict[str, Any], *, commit: bool = True) -> models.Asset:
     data = payload.model_dump(exclude_unset=True) if isinstance(payload, AssetCreate) else dict(payload)
+    asset_columns = {column.name for column in models.Asset.__table__.columns}
+    data = {key: value for key, value in data.items() if key in asset_columns}
     data = enrich_location(data)
     data["asset_code"] = data.get("asset_code") or _asset_code(db)
     asset = models.Asset(**data)
@@ -83,8 +90,9 @@ def create_asset(db: Session, payload: AssetCreate | dict[str, Any]) -> models.A
                 google_maps_link=asset.google_maps_link,
             )
         )
-    db.commit()
-    db.refresh(asset)
+    if commit:
+        db.commit()
+        db.refresh(asset)
     return asset
 
 
@@ -100,6 +108,20 @@ def update_asset(db: Session, asset: models.Asset, payload: AssetUpdate) -> mode
 
 
 def asset_to_dict(asset: models.Asset) -> dict[str, Any]:
+    contacts = [
+        {
+            "id": link.id,
+            "contact_id": link.contact_id,
+            "name": link.contact.name if link.contact else None,
+            "company": link.contact.company if link.contact else None,
+            "phone": link.contact.phone if link.contact else None,
+            "whatsapp": link.contact.whatsapp if link.contact else None,
+            "email": link.contact.email if link.contact else None,
+            "relationship_type": link.relationship_type,
+            "notes": link.notes,
+        }
+        for link in asset.contacts
+    ]
     return {
         "id": asset.id,
         "asset_code": asset.asset_code,
@@ -124,20 +146,12 @@ def asset_to_dict(asset: models.Asset) -> dict[str, Any]:
         "broker_id": asset.broker_id,
         "owner_name": asset.owner.name if asset.owner else None,
         "broker_name": asset.broker.name if asset.broker else None,
-        "contacts": [
-            {
-                "id": link.id,
-                "contact_id": link.contact_id,
-                "name": link.contact.name if link.contact else None,
-                "company": link.contact.company if link.contact else None,
-                "phone": link.contact.phone if link.contact else None,
-                "whatsapp": link.contact.whatsapp if link.contact else None,
-                "email": link.contact.email if link.contact else None,
-                "relationship_type": link.relationship_type,
-                "notes": link.notes,
-            }
-            for link in asset.contacts
-        ],
+        "contacts": contacts,
+        "people_summary": ", ".join(
+            f"{contact.get('name')} ({str(contact.get('relationship_type') or 'related').replace('_', ' ')})"
+            for contact in contacts[:5]
+            if contact.get("name")
+        ),
         "documents": [
             {
                 "id": document.id,
@@ -185,15 +199,173 @@ def asset_to_dict(asset: models.Asset) -> dict[str, Any]:
     }
 
 
-def filter_assets(db: Session, filters: dict[str, Any]) -> list[models.Asset]:
-    stmt: Select = select(models.Asset).options(
-        selectinload(models.Asset.owner),
-        selectinload(models.Asset.broker),
-        selectinload(models.Asset.contacts).selectinload(models.AssetContact.contact),
-        selectinload(models.Asset.documents),
-        selectinload(models.Asset.updates),
-        selectinload(models.Asset.tags),
-        selectinload(models.Asset.locations),
+def asset_to_summary_dict(asset: models.Asset) -> dict[str, Any]:
+    raw_source = asset.raw_source if isinstance(asset.raw_source, dict) else {}
+    people_summary = " | ".join(
+        part
+        for part in [
+            f"Owner: {asset.owner.name}" if asset.owner else "",
+            f"Broker: {asset.broker.name}" if asset.broker else "",
+        ]
+        if part
+    )
+    return {
+        "id": asset.id,
+        "asset_code": asset.asset_code,
+        "title": asset.title,
+        "asset_type": asset.asset_type,
+        "status": asset.status,
+        "source": asset.source,
+        "locality": asset.locality,
+        "area_name": asset.area_name,
+        "tehsil": asset.tehsil,
+        "district": asset.district,
+        "state": asset.state,
+        "address": asset.address,
+        "latitude": asset.latitude,
+        "longitude": asset.longitude,
+        "google_maps_link": asset.google_maps_link,
+        "land_area": asset.land_area,
+        "built_up_area": asset.built_up_area,
+        "asking_price": asset.asking_price,
+        "expected_price": asset.expected_price,
+        "owner_id": asset.owner_id,
+        "broker_id": asset.broker_id,
+        "owner_name": asset.owner.name if asset.owner else None,
+        "broker_name": asset.broker.name if asset.broker else None,
+        "contacts": [],
+        "people_summary": people_summary,
+        "documents": [],
+        "updates": [],
+        "tags": [],
+        "locations": [],
+        "workability_rating": asset.workability_rating,
+        "bottleneck_rating": asset.bottleneck_rating,
+        "bottleneck_notes": asset.bottleneck_notes,
+        "legal_status": asset.legal_status,
+        "zoning_status": asset.zoning_status,
+        "location_score": raw_source.get("location_score"),
+        "location_score_reason": raw_source.get("location_score_reason"),
+        "approval_status": asset.approval_status,
+        "raw_source": None,
+        "created_at": asset.created_at,
+        "updated_at": asset.updated_at,
+    }
+
+
+def filter_assets(
+    db: Session,
+    filters: dict[str, Any],
+    *,
+    summary: bool = False,
+    limit: int = 500,
+    offset: int = 0,
+    search: str | None = None,
+    sort: str = "updated_desc",
+) -> list[models.Asset]:
+    options = [selectinload(models.Asset.owner), selectinload(models.Asset.broker)]
+    if not summary:
+        options.extend(
+            [
+                selectinload(models.Asset.contacts).selectinload(models.AssetContact.contact),
+                selectinload(models.Asset.documents),
+                selectinload(models.Asset.updates),
+                selectinload(models.Asset.tags),
+                selectinload(models.Asset.locations),
+            ]
+        )
+    stmt: Select = select(models.Asset).options(*options)
+    for field in [
+        "asset_type",
+        "district",
+        "tehsil",
+        "locality",
+        "source",
+        "status",
+        "owner_id",
+        "broker_id",
+        "approval_status",
+    ]:
+        value = filters.get(field)
+        if value not in (None, ""):
+            stmt = stmt.where(getattr(models.Asset, field) == value)
+    workability_rating = filters.get("workability_rating")
+    if workability_rating not in (None, ""):
+        stmt = stmt.where(models.Asset.workability_rating >= int(workability_rating))
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            or_(
+                models.Asset.asset_code.ilike(like),
+                models.Asset.title.ilike(like),
+                models.Asset.district.ilike(like),
+                models.Asset.tehsil.ilike(like),
+                models.Asset.locality.ilike(like),
+                models.Asset.area_name.ilike(like),
+                models.Asset.source.ilike(like),
+            )
+        )
+    contact_id = filters.get("contact_id")
+    relationship_type = filters.get("relationship_type")
+    if contact_id not in (None, "") or relationship_type not in (None, ""):
+        stmt = stmt.join(models.AssetContact)
+        if contact_id not in (None, ""):
+            stmt = stmt.where(models.AssetContact.contact_id == int(contact_id))
+        if relationship_type not in (None, ""):
+            stmt = stmt.where(models.AssetContact.relationship_type == relationship_type)
+    if sort == "workability_desc":
+        stmt = stmt.order_by(models.Asset.workability_rating.desc().nullslast(), models.Asset.updated_at.desc())
+    elif sort == "price_desc":
+        stmt = stmt.order_by(models.Asset.asking_price.desc().nullslast(), models.Asset.updated_at.desc())
+    elif sort == "title_asc":
+        stmt = stmt.order_by(models.Asset.title.asc())
+    else:
+        stmt = stmt.order_by(models.Asset.updated_at.desc())
+    stmt = stmt.offset(max(0, offset)).limit(max(1, min(limit, 700)))
+    return list(db.scalars(stmt))
+
+
+def filter_asset_summaries(
+    db: Session,
+    filters: dict[str, Any],
+    *,
+    limit: int = 500,
+    offset: int = 0,
+    search: str | None = None,
+    sort: str = "updated_desc",
+) -> list[dict[str, Any]]:
+    location_score = cast(models.Asset.raw_source.op("->>")("location_score"), Float).label("location_score")
+    stmt = (
+        select(
+            models.Asset.id,
+            models.Asset.asset_code,
+            models.Asset.title,
+            models.Asset.asset_type,
+            models.Asset.status,
+            models.Asset.source,
+            models.Asset.locality,
+            models.Asset.area_name,
+            models.Asset.tehsil,
+            models.Asset.district,
+            models.Asset.latitude,
+            models.Asset.longitude,
+            models.Asset.google_maps_link,
+            models.Asset.asking_price,
+            models.Asset.expected_price,
+            models.Asset.owner_id,
+            models.Asset.broker_id,
+            models.Asset.workability_rating,
+            models.Asset.bottleneck_rating,
+            models.Asset.approval_status,
+            models.Asset.created_at,
+            models.Asset.updated_at,
+            models.Owner.name.label("owner_name"),
+            models.Broker.name.label("broker_name"),
+            location_score,
+        )
+        .select_from(models.Asset)
+        .outerjoin(models.Owner, models.Owner.id == models.Asset.owner_id)
+        .outerjoin(models.Broker, models.Broker.id == models.Asset.broker_id)
     )
     for field in [
         "asset_type",
@@ -204,11 +376,54 @@ def filter_assets(db: Session, filters: dict[str, Any]) -> list[models.Asset]:
         "status",
         "owner_id",
         "broker_id",
-        "workability_rating",
         "approval_status",
     ]:
         value = filters.get(field)
         if value not in (None, ""):
             stmt = stmt.where(getattr(models.Asset, field) == value)
-    stmt = stmt.order_by(models.Asset.updated_at.desc()).limit(500)
-    return list(db.scalars(stmt))
+    workability_rating = filters.get("workability_rating")
+    if workability_rating not in (None, ""):
+        stmt = stmt.where(models.Asset.workability_rating >= int(workability_rating))
+    contact_id = filters.get("contact_id")
+    relationship_type = filters.get("relationship_type")
+    if contact_id not in (None, "") or relationship_type not in (None, ""):
+        stmt = stmt.join(models.AssetContact, models.AssetContact.asset_id == models.Asset.id)
+        if contact_id not in (None, ""):
+            stmt = stmt.where(models.AssetContact.contact_id == int(contact_id))
+        if relationship_type not in (None, ""):
+            stmt = stmt.where(models.AssetContact.relationship_type == relationship_type)
+    if search:
+        like = f"%{search}%"
+        stmt = stmt.where(
+            or_(
+                models.Asset.asset_code.ilike(like),
+                models.Asset.title.ilike(like),
+                models.Asset.district.ilike(like),
+                models.Asset.tehsil.ilike(like),
+                models.Asset.locality.ilike(like),
+                models.Asset.area_name.ilike(like),
+                models.Asset.source.ilike(like),
+            )
+        )
+    if sort == "workability_desc":
+        stmt = stmt.order_by(models.Asset.workability_rating.desc().nullslast(), models.Asset.updated_at.desc())
+    elif sort == "price_desc":
+        stmt = stmt.order_by(models.Asset.asking_price.desc().nullslast(), models.Asset.updated_at.desc())
+    elif sort == "title_asc":
+        stmt = stmt.order_by(models.Asset.title.asc())
+    else:
+        stmt = stmt.order_by(models.Asset.updated_at.desc())
+    rows = db.execute(stmt.offset(max(0, offset)).limit(max(1, min(limit, 700)))).mappings().all()
+    summaries: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["people_summary"] = " | ".join(
+            part
+            for part in [
+                f"Owner: {item['owner_name']}" if item.get("owner_name") else "",
+                f"Broker: {item['broker_name']}" if item.get("broker_name") else "",
+            ]
+            if part
+        )
+        summaries.append(item)
+    return summaries
