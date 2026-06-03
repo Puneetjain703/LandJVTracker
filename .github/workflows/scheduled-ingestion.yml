@@ -1,0 +1,59 @@
+name: Scheduled source ingestion
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 07:00 IST and 19:00 IST. GitHub cron is UTC.
+    - cron: "30 1 * * *"
+    - cron: "30 13 * * *"
+
+concurrency:
+  group: scheduled-source-ingestion
+  cancel-in-progress: false
+
+jobs:
+  sync-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONPATH: .
+      ENVIRONMENT: production
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      API_SECRET_KEY: ${{ secrets.API_SECRET_KEY }}
+      APP_USERNAME: ${{ secrets.APP_USERNAME || 'admin' }}
+      APP_PASSWORD_HASH: ${{ secrets.APP_PASSWORD_HASH }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'gpt-4.1-mini' }}
+      OPENAI_TRANSCRIPTION_MODEL: ${{ secrets.OPENAI_TRANSCRIPTION_MODEL || 'whisper-1' }}
+      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      NOTION_SOURCE_NAME: ${{ secrets.NOTION_SOURCE_NAME || 'Pearl Spytech New Projects' }}
+      NOTION_PEARL_PROJECTS_PAGE_ID: ${{ secrets.NOTION_PEARL_PROJECTS_PAGE_ID || '29a5c898ef91805c8f62caccbd26b0af' }}
+      NOTION_ANALYZE_LRM_PAGE_ID: ${{ secrets.NOTION_ANALYZE_LRM_PAGE_ID || '2995c898ef918040a360c467e4837e4c' }}
+      NOTION_ANALYZE_LRM_SOURCE_NAME: ${{ secrets.NOTION_ANALYZE_LRM_SOURCE_NAME || 'Analyze the Property deals and update LRM' }}
+      NOTION_BROKERAGE_NEW_DEALS_PAGE_ID: ${{ secrets.NOTION_BROKERAGE_NEW_DEALS_PAGE_ID || '29a5c898ef91801598afdcf276fe057b' }}
+      NOTION_BROKERAGE_SOURCE_NAME: ${{ secrets.NOTION_BROKERAGE_SOURCE_NAME || 'Brokerage New Deals' }}
+      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID || '1LC7bnveXagIs8Kc4xIaxEMVcAkViJzX7KZQYyOJdmds' }}
+      GOOGLE_SHEET_TABS: ${{ secrets.GOOGLE_SHEET_TABS || 'Master-2026,Master' }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      AUTO_PUBLISH_INGESTED_ASSETS: "false"
+      ENABLE_BACKGROUND_SYNC: "false"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Initialize database schema
+        run: python scripts/init_db.py
+
+      - name: Run all source listeners
+        run: python scripts/sync_all_sources.py

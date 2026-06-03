@@ -10,6 +10,7 @@ import folium
 import pandas as pd
 import requests
 import streamlit as st
+from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 
@@ -470,7 +471,8 @@ def _headers() -> dict[str, str]:
 
 
 def api(method: str, path: str, **kwargs: Any) -> Any:
-    response = requests.request(method, f"{API_BASE_URL}{path}", headers=_headers(), timeout=60, **kwargs)
+    timeout = kwargs.pop("timeout", 60)
+    response = requests.request(method, f"{API_BASE_URL}{path}", headers=_headers(), timeout=timeout, **kwargs)
     if response.status_code == 401:
         st.session_state.pop("token", None)
         st.error("Session expired. Please log in again.")
@@ -780,51 +782,42 @@ def filter_rows_locally(rows: list[dict[str, Any]], query: str) -> list[dict[str
     ]
 
 
-def render_delete_confirmation() -> None:
-    pending = st.session_state.get("delete_asset_pending")
-    if not pending:
-        return
-    st.warning(f"Delete asset {pending}? This removes the property file, documents, locations, updates, contacts links, and deal records.")
-    c1, c2 = st.columns([1, 1])
-    if c1.button("Confirm delete", key=f"confirm_delete_{pending}", type="primary", use_container_width=True):
-        try:
-            result = api("DELETE", f"/assets/{pending}")
-            st.success(f"Deleted {result.get('asset_code') or pending}: {result.get('title') or ''}")
-            st.session_state.pop("delete_asset_pending", None)
-            for key in list(st.session_state.keys()):
-                if key.endswith("_open_asset_id") and st.session_state.get(key) == pending:
-                    st.session_state.pop(key, None)
-            cached_get.clear()
-            st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
-    if c2.button("Cancel", key=f"cancel_delete_{pending}", use_container_width=True):
-        st.session_state.pop("delete_asset_pending", None)
-        st.rerun()
+def render_delete_notice() -> None:
+    notice = st.session_state.pop("delete_notice", None)
+    if notice:
+        st.success(notice)
 
 
-def render_bulk_delete_confirmation() -> None:
-    pending = st.session_state.get("bulk_delete_asset_pending") or []
-    pending = [int(asset_id) for asset_id in pending if asset_id]
-    if not pending:
-        return
-    st.warning(f"Delete {len(pending)} selected asset(s)? This removes property files, documents, locations, updates, contact links, and deal records.")
-    c1, c2 = st.columns([1, 1])
-    if c1.button("Confirm bulk delete", key="confirm_bulk_delete", type="primary", use_container_width=True):
-        try:
-            result = api("POST", "/assets/bulk-delete", json={"asset_ids": pending})
-            st.success(f"Deleted {result.get('deleted_count', 0)} asset(s). Failed: {result.get('failed_count', 0)}.")
-            st.session_state.pop("bulk_delete_asset_pending", None)
-            for key in list(st.session_state.keys()):
-                if key.endswith("_open_asset_id") and st.session_state.get(key) in pending:
-                    st.session_state.pop(key, None)
-            cached_get.clear()
-            st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
-    if c2.button("Cancel bulk delete", key="cancel_bulk_delete", use_container_width=True):
-        st.session_state.pop("bulk_delete_asset_pending", None)
+def _clear_open_assets(deleted_ids: list[int]) -> None:
+    deleted = set(deleted_ids)
+    for key in list(st.session_state.keys()):
+        if key.endswith("_open_asset_id") and st.session_state.get(key) in deleted:
+            st.session_state.pop(key, None)
+
+
+def delete_asset_now(asset_id: int) -> None:
+    try:
+        result = api("DELETE", f"/assets/{asset_id}")
+        _clear_open_assets([asset_id])
+        cached_get.clear()
+        st.session_state["delete_notice"] = f"Deleted {result.get('asset_code') or asset_id}: {result.get('title') or ''}"
         st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
+
+
+def bulk_delete_assets_now(asset_ids: list[int]) -> None:
+    asset_ids = [int(asset_id) for asset_id in asset_ids if asset_id]
+    if not asset_ids:
+        return
+    try:
+        result = api("POST", "/assets/bulk-delete", json={"asset_ids": asset_ids})
+        _clear_open_assets(asset_ids)
+        cached_get.clear()
+        st.session_state["delete_notice"] = f"Deleted {result.get('deleted_count', 0)} asset(s). Failed: {result.get('failed_count', 0)}."
+        st.rerun()
+    except Exception as exc:
+        st.error(str(exc))
 
 
 def asset_card(row: dict[str, Any], open_state_key: str = "card_open_asset_id") -> None:
@@ -839,7 +832,7 @@ def asset_card(row: dict[str, Any], open_state_key: str = "card_open_asset_id") 
     if st.button("Open", key=f"open_card_{open_state_key}_{row.get('id')}", use_container_width=True):
         st.session_state[open_state_key] = row["id"]
     if st.button("Delete", key=f"delete_card_{open_state_key}_{row.get('id')}", use_container_width=True):
-        st.session_state["delete_asset_pending"] = row["id"]
+        delete_asset_now(int(row["id"]))
     html = (
         '<div class="asset-card">'
         f'<div class="chip-row">{chip_html}</div>'
@@ -897,8 +890,7 @@ def asset_list_page(title: str = "Asset Desk", preset_filters: dict[str, Any] | 
     rows = rows[:page_size]
     page_number = st.session_state[page_key] + 1
     st.caption(f"Page {page_number} · showing {len(rows)} properties")
-    render_delete_confirmation()
-    render_bulk_delete_confirmation()
+    render_delete_notice()
     df = compact_df(rows)
     selected_table_ids: list[int] = []
     if rows and view_mode == "Cards":
@@ -942,9 +934,9 @@ def asset_list_page(title: str = "Asset Desk", preset_filters: dict[str, Any] | 
         if open2.button("Open selected", use_container_width=True, type="primary"):
             st.session_state[f"{page_key}_open_asset_id"] = selected_table_ids[0] if selected_table_ids else selected_id
         if open3.button("Delete selected", use_container_width=True):
-            st.session_state["delete_asset_pending"] = selected_table_ids[0] if selected_table_ids else selected_id
+            delete_asset_now(int(selected_table_ids[0] if selected_table_ids else selected_id))
         if open4.button("Delete table selection", use_container_width=True, disabled=not selected_table_ids):
-            st.session_state["bulk_delete_asset_pending"] = selected_table_ids
+            bulk_delete_assets_now(selected_table_ids)
     nav1, nav2, nav3 = st.columns([1, 1, 4])
     if nav1.button("Previous", disabled=st.session_state[page_key] == 0, use_container_width=True):
         st.session_state[page_key] = max(0, st.session_state[page_key] - 1)
@@ -952,8 +944,7 @@ def asset_list_page(title: str = "Asset Desk", preset_filters: dict[str, Any] | 
     if nav2.button("Next", disabled=not has_more, use_container_width=True):
         st.session_state[page_key] += 1
         st.rerun()
-    render_delete_confirmation()
-    render_bulk_delete_confirmation()
+    render_delete_notice()
     open_asset_id = st.session_state.get(f"{page_key}_open_asset_id")
     if open_asset_id:
         asset_detail(open_asset_id)
@@ -1364,6 +1355,15 @@ def add_edit_page() -> None:
 
 
 def approval_summary_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    def table_value(value: Any) -> str:
+        if value in (None, ""):
+            return ""
+        if isinstance(value, list):
+            return ", ".join(table_value(item) for item in value if item not in (None, ""))
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False, default=str)
+        return str(value)
+
     summary: list[dict[str, Any]] = []
     for row in rows:
         payload = row.get("edited_payload") or row.get("payload") or {}
@@ -1372,20 +1372,20 @@ def approval_summary_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
             {
                 "Select": False,
                 "id": row["id"],
-                "title": row.get("title") or payload.get("title") or "Untitled",
-                "class": payload.get("asset_type") or "",
-                "source": row.get("source") or "",
-                "status": payload.get("status") or row.get("status") or "",
-                "locality": payload.get("locality") or payload.get("area_name") or "",
-                "district": payload.get("district") or "",
-                "land_area": payload.get("land_area") or "",
-                "asking_price": payload.get("asking_price") or "",
-                "owner": payload.get("owner_name") or "",
-                "broker": payload.get("broker_name") or "",
-                "notes": str(notes).replace("\n", " ")[:140],
+                "title": table_value(row.get("title") or payload.get("title") or "Untitled"),
+                "class": table_value(payload.get("asset_type")),
+                "source": table_value(row.get("source")),
+                "status": table_value(payload.get("status") or row.get("status")),
+                "locality": table_value(payload.get("locality") or payload.get("area_name")),
+                "district": table_value(payload.get("district")),
+                "land_area": table_value(payload.get("land_area")),
+                "asking_price": table_value(payload.get("asking_price")),
+                "owner": table_value(payload.get("owner_name")),
+                "broker": table_value(payload.get("broker_name")),
+                "notes": table_value(notes).replace("\n", " ")[:140],
             }
         )
-    return pd.DataFrame(summary)
+    return pd.DataFrame(summary).fillna("")
 
 
 def approval_payload_form(item: dict[str, Any]) -> tuple[dict[str, Any], str, bool, bool]:
@@ -1613,21 +1613,24 @@ def sync_page() -> None:
     )
     if st.button("Run all source listeners", use_container_width=True, type="primary"):
         try:
-            result = api("POST", "/sync/all")
-            st.json(result)
+            with st.spinner("Running Google Sheets and Notion listeners. This can take a few minutes when Notion has many pages."):
+                result = api("POST", "/sync/all", timeout=900)
+                st.json(result)
         except Exception as exc:
             st.error(str(exc))
     c1, c2 = st.columns(2)
     if c1.button("Run Google Sheets sync"):
         try:
-            result = api("POST", "/sync/google-sheets")
-            st.json(result)
+            with st.spinner("Running Google Sheets sync..."):
+                result = api("POST", "/sync/google-sheets", timeout=300)
+                st.json(result)
         except Exception as exc:
             st.error(str(exc))
     if c2.button("Run Notion sync"):
         try:
-            result = api("POST", "/sync/notion")
-            st.json(result)
+            with st.spinner("Running Notion sync..."):
+                result = api("POST", "/sync/notion", timeout=900)
+                st.json(result)
         except Exception as exc:
             st.error(str(exc))
     st.caption("Google Sheets needs a service-account JSON configured in env and the sheet shared with that service account.")
@@ -2022,17 +2025,16 @@ def dashboard_page() -> None:
         st.metric("High workability", high_workability)
         st.metric("Need map fix", unmapped)
 
-    # Interactive Portfolio Map Section
     mapped_assets = [row for row in assets if row.get("latitude") and row.get("longitude")]
+    st.markdown('<div class="section-label">Interactive Portfolio Map</div>', unsafe_allow_html=True)
+    st.caption(f"{len(mapped_assets)} mapped · {max(len(assets) - len(mapped_assets), 0)} need coordinates")
     if mapped_assets:
-        st.markdown('<div class="section-label">Interactive Portfolio Map</div>', unsafe_allow_html=True)
-        # Calculate mean coordinates to center the map
         mean_lat = sum(float(row["latitude"]) for row in mapped_assets) / len(mapped_assets)
         mean_lon = sum(float(row["longitude"]) for row in mapped_assets) / len(mapped_assets)
         
         fmap = folium.Map(location=[mean_lat, mean_lon], zoom_start=8, control_scale=True)
+        marker_cluster = MarkerCluster(name="Properties").add_to(fmap)
         
-        # Color coding marker icons based on type
         for row in mapped_assets:
             color = "blue"
             if row.get("asset_type") == "brokerage_listing":
@@ -2044,12 +2046,13 @@ def dashboard_page() -> None:
             
             loc_score = row.get("location_score")
             score_txt = f"{float(loc_score):.1f}/10" if loc_score is not None else "N/A"
+            title = escape(clip_text(row.get("title"), 110))
             
             popup_html = f"""
-            <div style="font-family: 'Inter', sans-serif; color: #111215; font-size: 12px; width: 220px; line-height: 1.4;">
-                <strong style="font-size: 13px; color: #a67b1e; display: block; margin-bottom: 4px;">{escape(row['title'])}</strong>
+            <div style="font-family: Arial, sans-serif; color: #111215; font-size: 12px; width: 230px; line-height: 1.4;">
+                <strong style="font-size: 13px; color: #a67b1e; display: block; margin-bottom: 4px;">{title}</strong>
                 <b>Code:</b> {escape(row.get('asset_code') or '-')}<br>
-                <b>Type:</b> {escape(labelize(row['asset_type']))}<br>
+                <b>Type:</b> {escape(labelize(row.get('asset_type')))}<br>
                 <b>Locality:</b> {escape(row.get('locality') or '-')}<br>
                 <b>Asking:</b> {escape(money(row.get('asking_price')))}<br>
                 <b>Location Score:</b> {score_txt}<br>
@@ -2057,16 +2060,18 @@ def dashboard_page() -> None:
             """
             
             folium.Marker(
-                location=[row["latitude"], row["longitude"]],
-                popup=folium.Popup(popup_html, max_width=250),
-                tooltip=row["title"],
+                location=[float(row["latitude"]), float(row["longitude"])],
+                popup=folium.Popup(folium.IFrame(html=popup_html, width=270, height=145), max_width=290),
+                tooltip=clip_text(row.get("title"), 70),
                 icon=folium.Icon(color=color, icon="info-sign")
-            ).add_to(fmap)
+            ).add_to(marker_cluster)
             
         st_folium(fmap, height=380, use_container_width=True)
+    else:
+        empty_panel("No mapped properties yet. Add latitude/longitude or a full address to property records to populate this map.")
 
     st.markdown('<div class="section-label">All properties table</div>', unsafe_allow_html=True)
-    render_bulk_delete_confirmation()
+    render_delete_notice()
     if assets:
         dashboard_df = compact_df(assets)
         dashboard_table_state = st.dataframe(
@@ -2090,7 +2095,7 @@ def dashboard_page() -> None:
         if t1.button("Open first selected", disabled=not dashboard_selected_ids, use_container_width=True):
             st.session_state["dashboard_open_asset_id"] = dashboard_selected_ids[0]
         if t2.button("Delete selected rows", disabled=not dashboard_selected_ids, use_container_width=True):
-            st.session_state["bulk_delete_asset_pending"] = dashboard_selected_ids
+            bulk_delete_assets_now(dashboard_selected_ids)
         if dashboard_selected_ids:
             t3.caption(f"{len(dashboard_selected_ids)} selected")
     else:
@@ -2099,7 +2104,7 @@ def dashboard_page() -> None:
     left, right = st.columns([1.15, 0.85], gap="large")
     with left:
         st.markdown('<div class="section-label">Strongest opportunities</div>', unsafe_allow_html=True)
-        render_delete_confirmation()
+        render_delete_notice()
         strongest = sorted(assets, key=lambda row: to_int(row.get("workability_rating")), reverse=True)[:6]
         if strongest:
             for start in range(0, len(strongest), 3):

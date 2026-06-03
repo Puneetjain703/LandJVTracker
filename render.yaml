@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: land-jv-tracker-api
+    env: docker
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: MODE
+        value: backend
+      - key: ENVIRONMENT
+        value: production
+      - key: ENABLE_BACKGROUND_SYNC
+        value: "false"
+      - key: AUTO_PUBLISH_INGESTED_ASSETS
+        value: "false"
+      - key: API_SECRET_KEY
+        sync: false
+      - key: APP_USERNAME
+        sync: false
+      - key: APP_PASSWORD_HASH
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_TRANSCRIPTION_MODEL
+        value: whisper-1
+      - key: NOTION_API_KEY
+        sync: false
+      - key: NOTION_PEARL_PROJECTS_PAGE_ID
+        value: 29a5c898ef91805c8f62caccbd26b0af
+      - key: NOTION_ANALYZE_LRM_PAGE_ID
+        value: 2995c898ef918040a360c467e4837e4c
+      - key: NOTION_BROKERAGE_NEW_DEALS_PAGE_ID
+        value: 29a5c898ef91801598afdcf276fe057b
+      - key: GOOGLE_SHEET_ID
+        value: 1LC7bnveXagIs8Kc4xIaxEMVcAkViJzX7KZQYyOJdmds
+      - key: GOOGLE_SHEET_TABS
+        value: Master-2026,Master
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false

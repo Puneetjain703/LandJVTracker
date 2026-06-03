@@ -7,8 +7,8 @@ Production-minded MVP for an internal brokerage, land, JV, resale, RE asset, and
 - FastAPI backend with authenticated endpoints
 - Streamlit MVP frontend
 - PostgreSQL schema for assets, deals, contacts, organizations, brokers, owners, documents, locations, updates, tags, approvals, sync logs, ingestion logs, CRM profiles, match suggestions, and AI query logs
-- Excel import with direct asset publishing by default, or optional approval queue review
-- Notion sync from the configured project pages with direct asset publishing by default
+- Excel import with approval queue review by default
+- Notion sync from the configured project pages with approval queue review by default
 - Approval/rejection workflow remains available when `AUTO_PUBLISH_INGESTED_ASSETS=false`
 - Map coordinates, Google Maps links, and no-key best-effort geocoding through OpenStreetMap Nominatim
 - Read-only AI assistant over retrieved asset rows
@@ -164,17 +164,22 @@ The Python path uses the SQLAlchemy models as the source of truth.
 
 - Run PostgreSQL as a managed database or via the included Docker Compose file.
 - Set `API_SECRET_KEY` to a long random value.
+- Set `ENVIRONMENT=production` on the hosted API to disable FastAPI docs/OpenAPI.
+- Use `APP_PASSWORD_HASH` instead of plain `APP_PASSWORD` online.
 - Configure the FastAPI backend behind internal network access or a reverse proxy with HTTPS.
 - Keep Streamlit behind internal auth or VPN. The MVP app also requires the API login token.
 - Use `scripts/sync_notion.py` from cron or GitHub Actions with environment variables injected as secrets.
 - Use `scripts/sync_all_sources.py` from cron or GitHub Actions to listen to Google Sheets, Pearl Spytech Notion, and Brokerage New Deals Notion together.
 - Keep `OPENAI_API_KEY` and `NOTION_API_KEY` only in the runtime environment.
+- For the recommended Streamlit Cloud + hosted FastAPI + GitHub Actions setup, see [`docs/deploy-online.md`](docs/deploy-online.md).
 
 For any hosted PostgreSQL service, set `DATABASE_URL` to its SQLAlchemy-compatible URL, for example:
 
 ```env
-DATABASE_URL=postgresql+psycopg2://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
+DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
 ```
+
+Plain hosted URLs such as `postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require` also work; the app normalizes them to the `psycopg` SQLAlchemy driver at runtime.
 
 Then run:
 
@@ -207,7 +212,7 @@ It reads:
 - Notion project page `Analyze the Property deals and update LRM`, including its Tasks and Notes relations
 - Notion project page `Brokerage New Deals`, including its Tasks and Notes relations
 
-By default, imported properties are auto-classified and inserted into the confirmed `assets` table as land purchase (`land`), brokerage opportunity (`brokerage_listing`), or joint venture (`jv`). Set `AUTO_PUBLISH_INGESTED_ASSETS=false` to send new items to `approval_queue` first. The sync checks existing approval items and confirmed assets with source ids and property fingerprints, so repeated properties are skipped.
+By default, imported properties are auto-classified and sent to `approval_queue` first. Keep `AUTO_PUBLISH_INGESTED_ASSETS=false` for approval-first ingestion, or set it to `true` only if you intentionally want automated insertion into the confirmed `assets` table. The sync checks existing approval items and confirmed assets with source ids and property fingerprints, so repeated properties are skipped.
 
 For Google Sheets, create a Google Cloud service account, put the JSON path in `GOOGLE_SERVICE_ACCOUNT_FILE` or the raw JSON in `GOOGLE_SERVICE_ACCOUNT_JSON`, and share the sheet with the service account email.
 

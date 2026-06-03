@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     app_password: str = "change-me"
     app_password_hash: str | None = None
 
-    database_url: str = "postgresql+psycopg2://land_jv:land_jv@localhost:5432/land_jv_tracker"
+    database_url: str = "postgresql+psycopg://land_jv:land_jv@localhost:5432/land_jv_tracker"
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     geocoder_user_agent: str = "land-jv-tracker-internal"
     google_maps_api_key: str | None = None
     auto_publish_ingested_assets: bool = False
+    enable_background_sync: bool = False
     
     # Scheduling settings (HH:MM format in UTC or local depending on server time)
     sync_schedule_morning: str = "07:00"

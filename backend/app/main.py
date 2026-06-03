@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -51,7 +51,56 @@ from backend.app.services.property_copilot import apply_copilot_actions, plan_co
 from backend.app.services.source_sync import sync_all_sources, sync_notion_project_sources
 
 
-app = FastAPI(title="Land and JV Tracker API", version="0.1.0")
+settings = get_settings()
+app = FastAPI(
+    title="Land and JV Tracker API",
+    version="0.1.0",
+    docs_url=None if settings.environment == "production" else "/docs",
+    redoc_url=None if settings.environment == "production" else "/redoc",
+    openapi_url=None if settings.environment == "production" else "/openapi.json",
+)
+
+_FAILED_LOGIN_WINDOW = timedelta(minutes=15)
+_FAILED_LOGIN_LIMIT = 5
+_failed_logins: dict[str, list[datetime]] = {}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+def _login_rate_key(request: Request, username: str) -> str:
+    client_host = request.client.host if request.client else "unknown"
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        client_host = forwarded_for.split(",", 1)[0].strip() or client_host
+    return f"{client_host}:{username.lower().strip()}"
+
+
+def _check_login_rate_limit(key: str) -> None:
+    now = datetime.now(timezone.utc)
+    recent = [attempt for attempt in _failed_logins.get(key, []) if now - attempt < _FAILED_LOGIN_WINDOW]
+    _failed_logins[key] = recent
+    if len(recent) >= _FAILED_LOGIN_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed login attempts. Try again later.",
+        )
+
+
+def _record_failed_login(key: str) -> None:
+    now = datetime.now(timezone.utc)
+    _failed_logins.setdefault(key, []).append(now)
+
+
+def _clear_failed_logins(key: str) -> None:
+    _failed_logins.pop(key, None)
 
 
 async def schedule_sync_loop() -> None:
@@ -98,8 +147,9 @@ async def schedule_sync_loop() -> None:
 @app.on_event("startup")
 def startup() -> None:
     create_all()
-    import asyncio
-    asyncio.create_task(schedule_sync_loop())
+    if get_settings().enable_background_sync:
+        import asyncio
+        asyncio.create_task(schedule_sync_loop())
 
 
 @app.get("/health")
@@ -108,9 +158,13 @@ def health() -> dict[str, str]:
 
 
 @app.post("/login", response_model=LoginResponse)
-def login(payload: LoginRequest) -> LoginResponse:
+def login(payload: LoginRequest, request: Request) -> LoginResponse:
+    rate_key = _login_rate_key(request, payload.username)
+    _check_login_rate_limit(rate_key)
     if not verify_login(payload.username, payload.password):
+        _record_failed_login(rate_key)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    _clear_failed_logins(rate_key)
     return LoginResponse(access_token=create_access_token(payload.username), username=payload.username)
 
 
