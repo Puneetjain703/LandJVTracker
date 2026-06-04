@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from html import escape
 from typing import Any
@@ -14,14 +15,78 @@ from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 
-def resolve_api_base_url() -> str:
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+SECRET_ENV_KEYS = [
+    "APP_MODE",
+    "DATABASE_URL",
+    "DATABASE_DRIVER",
+    "API_SECRET_KEY",
+    "APP_USERNAME",
+    "APP_PASSWORD",
+    "APP_PASSWORD_HASH",
+    "OPENAI_API_KEY",
+    "OPENAI_MODEL",
+    "OPENAI_TRANSCRIPTION_MODEL",
+    "NOTION_API_KEY",
+    "NOTION_DATABASE_ID",
+    "NOTION_SOURCE_NAME",
+    "NOTION_PEARL_PROJECTS_PAGE_ID",
+    "NOTION_ANALYZE_LRM_PAGE_ID",
+    "NOTION_ANALYZE_LRM_SOURCE_NAME",
+    "NOTION_BROKERAGE_NEW_DEALS_PAGE_ID",
+    "NOTION_BROKERAGE_SOURCE_NAME",
+    "GOOGLE_SHEET_ID",
+    "GOOGLE_SHEET_TABS",
+    "GOOGLE_SERVICE_ACCOUNT_JSON",
+    "GOOGLE_SERVICE_ACCOUNT_FILE",
+    "AUTO_PUBLISH_INGESTED_ASSETS",
+]
+
+
+def secret_value(name: str) -> Any:
     try:
-        secret_value = st.secrets.get("API_BASE_URL")
+        return st.secrets.get(name)
     except Exception:
-        secret_value = None
-    return (os.getenv("API_BASE_URL") or secret_value or "http://localhost:8000").rstrip("/")
+        return None
 
 
+def sync_streamlit_secrets_to_env() -> None:
+    for key in SECRET_ENV_KEYS:
+        if os.getenv(key):
+            continue
+        value = secret_value(key)
+        if value is not None:
+            os.environ[key] = str(value)
+
+
+sync_streamlit_secrets_to_env()
+
+
+def has_configured_value(name: str) -> bool:
+    return bool(os.getenv(name) or secret_value(name))
+
+
+def resolve_app_mode() -> str:
+    configured = str(os.getenv("APP_MODE") or secret_value("APP_MODE") or "").strip().lower()
+    if configured:
+        return configured
+    if has_configured_value("DATABASE_URL") and not has_configured_value("API_BASE_URL"):
+        return "direct"
+    return "api"
+
+
+def resolve_api_base_url() -> str:
+    return (os.getenv("API_BASE_URL") or secret_value("API_BASE_URL") or "http://localhost:8000").rstrip("/")
+
+
+APP_MODE = resolve_app_mode()
+DIRECT_MODE = APP_MODE in {"direct", "streamlit", "all_in_one", "all-in-one"}
+if DIRECT_MODE and not os.getenv("DATABASE_DRIVER"):
+    os.environ["DATABASE_DRIVER"] = "pg8000"
 API_BASE_URL = resolve_api_base_url()
 ASSET_TYPES = ["", "land", "jv", "resale_unit", "commercial", "rental", "brokerage_listing", "other"]
 UPDATE_TYPES = ["note", "price_revision", "status_change", "sold", "follow_up", "site_visit", "legal", "document", "other"]
@@ -478,7 +543,22 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+def _direct_user() -> str:
+    return st.session_state.get("username") or "streamlit"
+
+
 def api(method: str, path: str, **kwargs: Any) -> Any:
+    if DIRECT_MODE:
+        from backend.app.direct_runtime import direct_request
+
+        return direct_request(
+            method,
+            path,
+            params=kwargs.get("params"),
+            json_payload=kwargs.get("json"),
+            files=kwargs.get("files"),
+            user=_direct_user(),
+        )
     timeout = kwargs.pop("timeout", 60)
     response = requests.request(method, f"{API_BASE_URL}{path}", headers=_headers(), timeout=timeout, **kwargs)
     if response.status_code == 401:
@@ -497,6 +577,10 @@ def api(method: str, path: str, **kwargs: Any) -> Any:
 
 
 def api_bytes(method: str, path: str, **kwargs: Any) -> bytes:
+    if DIRECT_MODE:
+        from backend.app.direct_runtime import direct_bytes
+
+        return direct_bytes(method, path, user=_direct_user(), **kwargs)
     response = requests.request(method, f"{API_BASE_URL}{path}", headers=_headers(), timeout=120, **kwargs)
     if response.status_code == 401:
         st.session_state.pop("token", None)
@@ -508,6 +592,10 @@ def api_bytes(method: str, path: str, **kwargs: Any) -> bytes:
 
 
 def api_form(path: str, data: dict[str, Any], uploads: list[dict[str, Any]] | None = None) -> Any:
+    if DIRECT_MODE:
+        from backend.app.direct_runtime import direct_form
+
+        return direct_form(path, data, uploads, user=_direct_user())
     files = [
         ("files", (upload["name"], upload["bytes"], upload.get("type") or "application/octet-stream"))
         for upload in uploads or []
@@ -536,11 +624,15 @@ def cached_get(api_base_url: str, path: str, params_items: tuple[tuple[str, Any]
 
 def api_get_cached(path: str, params: dict[str, Any] | None = None) -> Any:
     params = clean_payload(params or {}, keep_zero_fields={"offset"})
+    if DIRECT_MODE:
+        return api("GET", path, params=params)
     return cached_get(API_BASE_URL, path, tuple(sorted(params.items())), st.session_state.get("token"))
 
 
 @st.cache_data(ttl=90, show_spinner=False)
 def cached_people(api_base_url: str, token: str | None) -> list[dict[str, Any]]:
+    if DIRECT_MODE:
+        return api("GET", "/people")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     response = requests.get(f"{api_base_url}/people", headers=headers, timeout=60)
     response.raise_for_status()
@@ -568,7 +660,9 @@ def login_page() -> None:
         )
     with right:
         st.markdown('<div class="section-label">Secure workspace</div>', unsafe_allow_html=True)
-        if API_BASE_URL.startswith("http://localhost") or API_BASE_URL.startswith("http://127.0.0.1"):
+        if DIRECT_MODE:
+            st.caption("Running Streamlit-only mode. No separate FastAPI backend is required.")
+        elif API_BASE_URL.startswith("http://localhost") or API_BASE_URL.startswith("http://127.0.0.1"):
             st.warning(
                 "API backend is set to localhost. This works only on your laptop. "
                 "For Streamlit Cloud, set API_BASE_URL in Streamlit secrets to your hosted FastAPI URL."
@@ -579,6 +673,14 @@ def login_page() -> None:
             submitted = st.form_submit_button("Enter tracker", use_container_width=True, type="primary")
     if submitted:
         try:
+            if DIRECT_MODE:
+                from backend.app.direct_runtime import verify_direct_login
+
+                if not verify_direct_login(username, password):
+                    raise RuntimeError("Invalid username or password")
+                st.session_state["token"] = "streamlit-direct-session"
+                st.session_state["username"] = username
+                st.rerun()
             response = requests.post(
                 f"{API_BASE_URL}/login",
                 json={"username": username, "password": password},

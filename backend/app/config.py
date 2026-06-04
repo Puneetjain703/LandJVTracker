@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     app_password_hash: str | None = None
 
     database_url: str = "postgresql+psycopg://land_jv:land_jv@localhost:5432/land_jv_tracker"
+    database_driver: str = "psycopg"
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"

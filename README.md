@@ -4,8 +4,8 @@ Production-minded MVP for an internal brokerage, land, JV, resale, RE asset, and
 
 ## What is included
 
-- FastAPI backend with authenticated endpoints
-- Streamlit MVP frontend
+- FastAPI backend with authenticated endpoints for optional future API use
+- Streamlit MVP frontend, including Streamlit-only direct database mode for online deployment
 - PostgreSQL schema for assets, deals, contacts, organizations, brokers, owners, documents, locations, updates, tags, approvals, sync logs, ingestion logs, CRM profiles, match suggestions, and AI query logs
 - Excel import with approval queue review by default
 - Notion sync from the configured project pages with approval queue review by default
@@ -43,6 +43,19 @@ Open:
 
 - API health: http://localhost:8000/health
 - Streamlit app: http://localhost:8501
+
+For Streamlit-only local mode, skip `uvicorn` and set:
+
+```env
+APP_MODE=direct
+DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
+```
+
+Then run only:
+
+```bash
+streamlit run frontend/streamlit_app.py --server.port 8501
+```
 
 Default MVP login comes from `.env`:
 
@@ -163,15 +176,15 @@ The Python path uses the SQLAlchemy models as the source of truth.
 ## Deployment notes
 
 - Run PostgreSQL as a managed database or via the included Docker Compose file.
+- For the online MVP, use Streamlit-only direct mode. Set `APP_MODE=direct`, `DATABASE_DRIVER=pg8000`, and `DATABASE_URL` in Streamlit secrets.
+- Do not set `API_BASE_URL` on Streamlit Cloud unless you intentionally deploy FastAPI later.
 - Set `API_SECRET_KEY` to a long random value.
-- Set `ENVIRONMENT=production` on the hosted API to disable FastAPI docs/OpenAPI.
 - Use `APP_PASSWORD_HASH` instead of plain `APP_PASSWORD` online.
-- Configure the FastAPI backend behind internal network access or a reverse proxy with HTTPS.
-- Keep Streamlit behind internal auth or VPN. The MVP app also requires the API login token.
+- The Streamlit app login protects all pages before database access.
 - Use `scripts/sync_notion.py` from cron or GitHub Actions with environment variables injected as secrets.
 - Use `scripts/sync_all_sources.py` from cron or GitHub Actions to listen to Google Sheets, Pearl Spytech Notion, and Brokerage New Deals Notion together.
 - Keep `OPENAI_API_KEY` and `NOTION_API_KEY` only in the runtime environment.
-- For the recommended Streamlit Cloud + hosted FastAPI + GitHub Actions setup, see [`docs/deploy-online.md`](docs/deploy-online.md).
+- For the recommended Streamlit Cloud + Neon + GitHub Actions setup, see [`docs/deploy-online.md`](docs/deploy-online.md).
 
 For any hosted PostgreSQL service, set `DATABASE_URL` to its SQLAlchemy-compatible URL, for example:
 
@@ -180,6 +193,7 @@ DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/DATABASE?sslmode=requi
 ```
 
 Plain hosted URLs such as `postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require` also work; the app normalizes them to the `psycopg` SQLAlchemy driver at runtime.
+In Streamlit-only online mode, set `DATABASE_DRIVER=pg8000` so Streamlit Cloud uses the pure-Python Postgres driver.
 
 Then run:
 
