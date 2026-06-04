@@ -61,6 +61,8 @@ Deploy:
 - Main file path: `frontend/streamlit_app.py`
 - Advanced settings Python version: choose Python `3.12` for the most stable dependency support.
 
+The frontend has its own dependency file at `frontend/requirements.txt`. Streamlit Community Cloud checks the entrypoint directory first, so it will install only frontend packages and avoid backend-only database dependencies.
+
 Set Streamlit secrets as root-level values:
 
 ```toml
