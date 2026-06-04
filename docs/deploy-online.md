@@ -69,7 +69,9 @@ Set Streamlit secrets as root-level values:
 API_BASE_URL = "https://YOUR-BACKEND-HOST"
 ```
 
-Root-level Streamlit secrets are available as environment variables, so the frontend can read `API_BASE_URL` through `os.getenv`.
+The frontend reads `API_BASE_URL` from Streamlit secrets first, then from environment variables. Do not leave it as `localhost` on Streamlit Cloud; `localhost` means the Streamlit container, not your FastAPI backend.
+
+If login shows `HTTPConnectionPool(host='localhost', port=8000)`, the frontend is online but the backend URL has not been configured. Deploy the FastAPI backend first, then put its public HTTPS URL in `API_BASE_URL`.
 
 The Streamlit frontend has its own login screen, but all sensitive data still comes from the backend. If someone bypasses the UI, the backend requires a bearer token for every data endpoint.
 

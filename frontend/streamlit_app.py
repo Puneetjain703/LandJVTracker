@@ -14,7 +14,15 @@ from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
 
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+def resolve_api_base_url() -> str:
+    try:
+        secret_value = st.secrets.get("API_BASE_URL")
+    except Exception:
+        secret_value = None
+    return (os.getenv("API_BASE_URL") or secret_value or "http://localhost:8000").rstrip("/")
+
+
+API_BASE_URL = resolve_api_base_url()
 ASSET_TYPES = ["", "land", "jv", "resale_unit", "commercial", "rental", "brokerage_listing", "other"]
 UPDATE_TYPES = ["note", "price_revision", "status_change", "sold", "follow_up", "site_visit", "legal", "document", "other"]
 CONTACT_ROLES = [
@@ -560,22 +568,36 @@ def login_page() -> None:
         )
     with right:
         st.markdown('<div class="section-label">Secure workspace</div>', unsafe_allow_html=True)
+        if API_BASE_URL.startswith("http://localhost") or API_BASE_URL.startswith("http://127.0.0.1"):
+            st.warning(
+                "API backend is set to localhost. This works only on your laptop. "
+                "For Streamlit Cloud, set API_BASE_URL in Streamlit secrets to your hosted FastAPI URL."
+            )
         with st.form("login"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Enter tracker", use_container_width=True, type="primary")
     if submitted:
         try:
-            data = requests.post(
+            response = requests.post(
                 f"{API_BASE_URL}/login",
                 json={"username": username, "password": password},
                 timeout=30,
-            ).json()
+            )
+            data = response.json()
             if "access_token" not in data:
                 raise RuntimeError(data.get("detail", "Login failed"))
             st.session_state["token"] = data["access_token"]
             st.session_state["username"] = data["username"]
             st.rerun()
+        except requests.exceptions.ConnectionError as exc:
+            if API_BASE_URL.startswith("http://localhost") or API_BASE_URL.startswith("http://127.0.0.1"):
+                st.error(
+                    "Login failed because the Streamlit app is pointing to localhost:8000. "
+                    "Deploy the FastAPI backend and set API_BASE_URL in Streamlit secrets to that public HTTPS URL."
+                )
+            else:
+                st.error(f"Login failed: could not reach backend at {API_BASE_URL}. {exc}")
         except Exception as exc:
             st.error(f"Login failed: {exc}")
 
