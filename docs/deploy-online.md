@@ -127,6 +127,8 @@ AUTO_PUBLISH_INGESTED_ASSETS=false
 
 So new source items go to the approval queue first.
 
+If the workflow says `Initialize database schema` failed, check the run summary first. The workflow now skips cleanly and lists missing secrets when `DATABASE_URL` is not configured. GitHub Actions does not read local `.env` or Streamlit Cloud secrets; repository secrets must be added separately.
+
 ## Security Checklist
 
 - `ENVIRONMENT=production` on the backend.

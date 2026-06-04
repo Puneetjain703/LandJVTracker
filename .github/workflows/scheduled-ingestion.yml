@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       PYTHONPATH: .
       ENVIRONMENT: production
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -40,20 +41,53 @@ jobs:
       ENABLE_BACKGROUND_SYNC: "false"
 
     steps:
+      - name: Validate required configuration
+        id: preflight
+        shell: bash
+        run: |
+          missing=()
+          if [ -z "${DATABASE_URL}" ]; then
+            missing+=("DATABASE_URL")
+          fi
+          if [ -z "${NOTION_API_KEY}" ] && [ -z "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]; then
+            missing+=("NOTION_API_KEY or GOOGLE_SERVICE_ACCOUNT_JSON")
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            {
+              echo "## Scheduled ingestion skipped"
+              echo
+              echo "The workflow is installed, but these GitHub Actions secrets are missing:"
+              printf -- "- %s\n" "${missing[@]}"
+              echo
+              echo "Add them under: Settings -> Secrets and variables -> Actions -> Repository secrets."
+              echo "The app itself can still run; only automated source ingestion is skipped."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Check out repository
+        if: steps.preflight.outputs.ready == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.preflight.outputs.ready == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
 
       - name: Install dependencies
+        if: steps.preflight.outputs.ready == 'true'
         run: pip install -r requirements.txt
 
       - name: Initialize database schema
+        if: steps.preflight.outputs.ready == 'true'
         run: python scripts/init_db.py
 
       - name: Run all source listeners
+        if: steps.preflight.outputs.ready == 'true'
         run: python scripts/sync_all_sources.py
