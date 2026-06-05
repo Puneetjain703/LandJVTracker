@@ -15,15 +15,15 @@ Deploy:
 - Repository: this repo
 - Branch: `main`
 - Main file path: `frontend/streamlit_app.py`
-- Python version: choose Python `3.12` if Streamlit offers it. The app also avoids psycopg wheels online by using `pg8000`.
+- Python version: choose Python `3.12` if Streamlit offers it. The app uses Psycopg 3 binary wheels for Postgres.
 
-Streamlit Cloud installs `frontend/requirements.txt`, which includes the all-in-one Streamlit runtime and a pure-Python Postgres driver.
+Streamlit Cloud installs `frontend/requirements.txt`, which includes the all-in-one Streamlit runtime and the Postgres drivers.
 
 Set Streamlit secrets as root-level values:
 
 ```toml
 APP_MODE = "direct"
-DATABASE_DRIVER = "pg8000"
+DATABASE_DRIVER = "psycopg"
 DATABASE_URL = "postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require"
 API_SECRET_KEY = "a-long-random-value"
 APP_USERNAME = "your-login"
@@ -35,7 +35,7 @@ NOTION_API_KEY = "optional"
 GOOGLE_SERVICE_ACCOUNT_JSON = "optional"
 ```
 
-If Streamlit Cloud reports a password auth failure even when diagnostics match the expected password fingerprint, bypass the Neon pooler:
+If Streamlit Cloud reports a password auth failure even when diagnostics match the expected password fingerprint, first use `DATABASE_DRIVER = "psycopg"`. If you intentionally switch back to `pg8000`, you can also bypass the Neon pooler:
 
 ```toml
 DATABASE_DISABLE_NEON_POOLER = "true"

@@ -176,7 +176,7 @@ The Python path uses the SQLAlchemy models as the source of truth.
 ## Deployment notes
 
 - Run PostgreSQL as a managed database or via the included Docker Compose file.
-- For the online MVP, use Streamlit-only direct mode. Set `APP_MODE=direct`, `DATABASE_DRIVER=pg8000`, and `DATABASE_URL` in Streamlit secrets.
+- For the online MVP, use Streamlit-only direct mode. Set `APP_MODE=direct`, `DATABASE_DRIVER=psycopg`, and `DATABASE_URL` in Streamlit secrets.
 - Do not set `API_BASE_URL` on Streamlit Cloud unless you intentionally deploy FastAPI later.
 - Set `API_SECRET_KEY` to a long random value.
 - Use `APP_PASSWORD_HASH` instead of plain `APP_PASSWORD` online.
@@ -192,8 +192,8 @@ For any hosted PostgreSQL service, set `DATABASE_URL` to its SQLAlchemy-compatib
 DATABASE_URL=postgresql+psycopg://USER:PASSWORD@HOST:5432/DATABASE?sslmode=require
 ```
 
-Plain hosted URLs such as `postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require` also work; the app normalizes them to the `psycopg` SQLAlchemy driver at runtime.
-In Streamlit-only online mode, set `DATABASE_DRIVER=pg8000` so Streamlit Cloud uses the pure-Python Postgres driver.
+Plain hosted URLs such as `postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require` also work; the app normalizes them to the configured SQLAlchemy driver at runtime.
+In Streamlit-only online mode, set `DATABASE_DRIVER=psycopg`.
 
 Then run:
 

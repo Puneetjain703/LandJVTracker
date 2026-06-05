@@ -88,7 +88,7 @@ def resolve_api_base_url() -> str:
 APP_MODE = resolve_app_mode()
 DIRECT_MODE = APP_MODE in {"direct", "streamlit", "all_in_one", "all-in-one"}
 if DIRECT_MODE and not os.getenv("DATABASE_DRIVER"):
-    os.environ["DATABASE_DRIVER"] = "pg8000"
+    os.environ["DATABASE_DRIVER"] = "psycopg"
 API_BASE_URL = resolve_api_base_url()
 ASSET_TYPES = ["", "land", "jv", "resale_unit", "commercial", "rental", "brokerage_listing", "other"]
 UPDATE_TYPES = ["note", "price_revision", "status_change", "sold", "follow_up", "site_visit", "legal", "document", "other"]
