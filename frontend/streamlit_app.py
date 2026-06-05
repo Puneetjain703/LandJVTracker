@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sys
-from urllib.parse import urlsplit
+import hashlib
+from urllib.parse import unquote, urlsplit
 from pathlib import Path
 from html import escape
 from typing import Any
@@ -25,6 +26,7 @@ SECRET_ENV_KEYS = [
     "APP_MODE",
     "DATABASE_URL",
     "DATABASE_DRIVER",
+    "DB_DIAGNOSTICS",
     "API_SECRET_KEY",
     "APP_USERNAME",
     "APP_PASSWORD",
@@ -561,6 +563,35 @@ def _redacted_database_target() -> str:
         return "DATABASE_URL is set but could not be parsed for diagnostics"
 
 
+def _bool_env(name: str) -> bool:
+    return str(os.getenv(name) or secret_value(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _database_secret_diagnostics() -> dict[str, Any]:
+    raw_url = os.getenv("DATABASE_URL") or str(secret_value("DATABASE_URL") or "")
+    diagnostics: dict[str, Any] = {
+        "mode": APP_MODE,
+        "driver": os.getenv("DATABASE_DRIVER") or str(secret_value("DATABASE_DRIVER") or ""),
+        "target": _redacted_database_target(),
+        "url_length": len(raw_url),
+    }
+    try:
+        parsed = urlsplit(raw_url)
+        password = unquote(parsed.password or "")
+        diagnostics.update(
+            {
+                "username": parsed.username or "",
+                "database": parsed.path.lstrip("/") or "",
+                "password_length": len(password),
+                "password_sha256_prefix": hashlib.sha256(password.encode("utf-8")).hexdigest()[:12] if password else "",
+                "query_keys": sorted(key for key in [part.split("=", 1)[0] for part in parsed.query.split("&") if part]),
+            }
+        )
+    except Exception as exc:
+        diagnostics["parse_error"] = str(exc)
+    return diagnostics
+
+
 def _direct_error(exc: Exception) -> RuntimeError:
     message = str(exc)
     lower = message.lower()
@@ -699,6 +730,9 @@ def login_page() -> None:
         st.markdown('<div class="section-label">Secure workspace</div>', unsafe_allow_html=True)
         if DIRECT_MODE:
             st.caption("Running Streamlit-only mode. No separate FastAPI backend is required.")
+            if _bool_env("DB_DIAGNOSTICS"):
+                with st.expander("Database secret diagnostics", expanded=True):
+                    st.json(_database_secret_diagnostics())
         elif API_BASE_URL.startswith("http://localhost") or API_BASE_URL.startswith("http://127.0.0.1"):
             st.warning(
                 "API backend is set to localhost. This works only on your laptop. "

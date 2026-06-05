@@ -41,6 +41,14 @@ Use the full connection string copied from Neon whenever possible. If you manual
 
 After changing Streamlit secrets, reboot the app from Streamlit Cloud so the running container reloads them.
 
+If Neon still reports password authentication failure, temporarily add:
+
+```toml
+DB_DIAGNOSTICS = "true"
+```
+
+The login page will show a redacted database target plus password length and a short SHA256 prefix. Remove this setting after troubleshooting.
+
 For Google Sheets sync, also set:
 
 ```toml
