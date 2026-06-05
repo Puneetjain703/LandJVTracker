@@ -4,7 +4,7 @@ folium>=0.19,<1
 pandas>=2.3,<3
 requests>=2.32,<3
 sqlalchemy>=2.0,<3
-pg8000>=1.31,<2
+pg8000==1.31.4
 pydantic>=2.10,<3
 pydantic-settings>=2.7,<3
 passlib[bcrypt]>=1.7,<2

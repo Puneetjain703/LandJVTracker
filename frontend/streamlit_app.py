@@ -549,8 +549,7 @@ def _direct_user() -> str:
     return st.session_state.get("username") or "streamlit"
 
 
-def _redacted_database_target() -> str:
-    raw_url = os.getenv("DATABASE_URL") or str(secret_value("DATABASE_URL") or "")
+def _redact_database_url(raw_url: str) -> str:
     if not raw_url:
         return "DATABASE_URL is not set"
     try:
@@ -564,6 +563,19 @@ def _redacted_database_target() -> str:
         return "DATABASE_URL is set but could not be parsed for diagnostics"
 
 
+def _redacted_database_target() -> str:
+    return _redact_database_url(os.getenv("DATABASE_URL") or str(secret_value("DATABASE_URL") or ""))
+
+
+def _effective_database_target() -> str:
+    try:
+        from backend.app.db import database_url
+
+        return _redact_database_url(database_url)
+    except Exception as exc:
+        return f"Effective target unavailable: {exc}"
+
+
 def _bool_env(name: str) -> bool:
     return str(os.getenv(name) or secret_value(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -571,9 +583,12 @@ def _bool_env(name: str) -> bool:
 def _database_secret_diagnostics() -> dict[str, Any]:
     raw_url = os.getenv("DATABASE_URL") or str(secret_value("DATABASE_URL") or "")
     diagnostics: dict[str, Any] = {
+        "diagnostic_version": "dbdiag-20260605-2",
         "mode": APP_MODE,
         "driver": os.getenv("DATABASE_DRIVER") or str(secret_value("DATABASE_DRIVER") or ""),
-        "target": _redacted_database_target(),
+        "disable_neon_pooler": _bool_env("DATABASE_DISABLE_NEON_POOLER"),
+        "raw_target": _redacted_database_target(),
+        "effective_target": _effective_database_target(),
         "url_length": len(raw_url),
     }
     try:
@@ -599,8 +614,8 @@ def _direct_error(exc: Exception) -> RuntimeError:
     if "password authentication failed" in lower or "28p01" in lower:
         message += (
             "\n\nDatabase login failed. The app is using this redacted target: "
-            f"{_redacted_database_target()}. "
-            "If that target is not exactly your current Neon host/user/database, Streamlit is still using stale secrets. "
+            f"{_redacted_database_target()}. Effective target: {_effective_database_target()}. "
+            "If the effective target still contains '-pooler' after setting DATABASE_DISABLE_NEON_POOLER=true, Streamlit has not picked up the latest code or secret. "
             "If it is correct, copy the full Neon connection string again rather than manually pasting only the password. "
             "Passwords containing symbols like @, #, /, ?, %, or & must be URL-encoded in DATABASE_URL."
         )
