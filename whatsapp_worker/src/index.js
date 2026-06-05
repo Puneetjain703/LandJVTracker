@@ -348,6 +348,32 @@ function isNewLead(textValue, hasMediaWithoutAsset) {
   );
 }
 
+function mapsLink(textValue) {
+  return cleanText(textValue).match(/https?:\/\/(?:maps\.app\.goo\.gl|goo\.gl\/maps|www\.google\.[^\s]+\/maps|google\.[^\s]+\/maps)[^\s]*/i)?.[0] || "";
+}
+
+function hasPropertyDetailWords(textValue) {
+  return /\b(plot|land|jv|joint venture|brokerage|owner|broker|asking|price|rate|bigha|acre|sqyd|sq yd|yard|gaj|approval|g\+|commercial|resale|rental)\b/i.test(
+    textValue
+  );
+}
+
+function isStandaloneCollateral(message, textValue) {
+  const text = cleanText(textValue);
+  const onlyMap = Boolean(mapsLink(text)) && !hasPropertyDetailWords(text);
+  return Boolean((message.mediaId && !hasPropertyDetailWords(text)) || (message.latitude !== null && !hasPropertyDetailWords(text)) || onlyMap);
+}
+
+function requestedAction(textValue) {
+  const lower = cleanText(textValue).toLowerCase();
+  if (!lower) return "";
+  if (/^(new|create|start|start draft|new property|new deal|add property|add deal)\b/.test(lower)) return "create";
+  if (/^(info|search|find|show|which|tell|what|where|who|list)\b/.test(lower)) return "info";
+  if (/^(edit|update|add update|note|spoke|conversation)\b/.test(lower)) return "update";
+  if (/^(attach|add document|add docs|add photo|add map|link document)\b/.test(lower)) return "attach";
+  return "";
+}
+
 function confirmationCommand(textValue) {
   const lower = cleanText(textValue).toLowerCase();
   if (!lower) return "";
@@ -370,6 +396,18 @@ function wantsDraftSummary(textValue) {
 
 function hasValue(value) {
   return value !== null && value !== undefined && cleanText(value) !== "";
+}
+
+function actionHelpText() {
+  return [
+    "Tell me the mode first when the message is ambiguous:",
+    "NEW or CREATE - start/continue a private property draft",
+    "CONFIRM - move the draft to Approval Inbox",
+    "CANCEL - discard the draft",
+    "INFO <question> - search the confirmed database",
+    "UPDATE <property detail> - add an update to an existing asset",
+    "ATTACH LJV-00029 - attach the current document/map to a known asset",
+  ].join("\n");
 }
 
 async function openAiJson(env, system, user) {
@@ -439,6 +477,7 @@ function fallbackLeadPayload(textValue, from, extracted = {}) {
     source: "whatsapp",
     locality: cleanText(extracted.locality || localityMatch?.[1] || ""),
     district: cleanText(extracted.district || ""),
+    google_maps_link: cleanText(extracted.google_maps_link || mapsLink(textValue) || ""),
     land_area: cleanText(extracted.land_area || areaMatch?.[0] || ""),
     asking_price: extracted.asking_price || price,
     owner_name: cleanText(extracted.owner_name || ""),
@@ -454,6 +493,49 @@ function fallbackLeadPayload(textValue, from, extracted = {}) {
     },
   };
   return Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== "" && value !== null && value !== undefined));
+}
+
+function collateralDraftPayload(message, from, textValue) {
+  const link = mapsLink(textValue);
+  const payload = {
+    title: message.locationName || (link || message.latitude !== null ? "WhatsApp map/location draft" : "WhatsApp document draft"),
+    asset_type: "other",
+    status: "lead",
+    source: "whatsapp",
+    locality: message.locationName || "",
+    address: message.locationAddress || "",
+    latitude: message.latitude,
+    longitude: message.longitude,
+    google_maps_link: link || (message.latitude !== null && message.longitude !== null ? `https://www.google.com/maps?q=${message.latitude},${message.longitude}` : ""),
+    bottleneck_notes: cleanText(textValue || message.mediaCaption || "Collateral received before property details."),
+    raw_source: {
+      whatsapp: {
+        from,
+        original_message: textValue,
+        extracted_by: "collateral_seed",
+        captured_at: new Date().toISOString(),
+      },
+    },
+  };
+  return Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== "" && value !== null && value !== undefined));
+}
+
+function blankDraftPayload(from, textValue = "") {
+  return {
+    title: cleanText(textValue.replace(/^(new|create|start|start draft|new property|new deal|add property|add deal)\b/i, "")) || "WhatsApp property draft",
+    asset_type: "other",
+    status: "lead",
+    source: "whatsapp",
+    bottleneck_notes: "",
+    raw_source: {
+      whatsapp: {
+        from,
+        original_message: textValue,
+        extracted_by: "blank_draft",
+        captured_at: new Date().toISOString(),
+      },
+    },
+  };
 }
 
 async function openAiExtractLead(env, textValue, from) {
@@ -566,6 +648,8 @@ function documentFromMessage(message) {
 
 function applyMessageContext(payload, message, from, messageText) {
   const next = { ...payload };
+  const link = mapsLink(messageText || message.bodyText || message.mediaCaption || "");
+  if (link) next.google_maps_link = link;
   if (message.latitude !== null && Number.isFinite(message.latitude)) next.latitude = message.latitude;
   if (message.longitude !== null && Number.isFinite(message.longitude)) next.longitude = message.longitude;
   if (next.latitude && next.longitude && !next.google_maps_link) {
@@ -751,14 +835,17 @@ async function addAssetUpdate(sql, asset, messageText, from, updateType = "whats
 }
 
 async function addAssetDocument(sql, asset, message, from) {
+  const link = mapsLink(message.bodyText || message.mediaCaption || "");
+  const doc = documentFromMessage(message);
   await sql`
-    INSERT INTO asset_documents (asset_id, document_name, document_type, storage_path, notes)
+    INSERT INTO asset_documents (asset_id, document_name, document_type, url, storage_path, notes)
     VALUES (
       ${asset.id},
-      ${message.mediaFilename || message.mediaCaption || `WhatsApp media ${message.mediaId}`},
-      ${message.type || "whatsapp_media"},
-      ${`whatsapp:${message.mediaId}`},
-      ${`Captured from WhatsApp sender ${from}. Media ID: ${message.mediaId || "-"}${message.mediaCaption ? `. Caption: ${message.mediaCaption}` : ""}`}
+      ${doc?.document_name || (link ? "WhatsApp Google Maps link" : `WhatsApp reference ${message.wamid}`)},
+      ${doc?.document_type || (link ? "map_link" : message.type || "whatsapp_reference")},
+      ${doc?.url || link || null},
+      ${doc?.storage_path || (message.mediaId ? `whatsapp:${message.mediaId}` : null)},
+      ${doc?.notes || `Captured from WhatsApp sender ${from}.${link ? ` Map: ${link}` : ""}${message.mediaId ? ` Media ID: ${message.mediaId}` : ""}${message.mediaCaption ? `. Caption: ${message.mediaCaption}` : ""}`}
     )
   `;
 }
@@ -779,6 +866,17 @@ async function logMessage(sql, record) {
     )
     ON CONFLICT (wamid) DO NOTHING
   `;
+}
+
+async function existingMessageReply(sql, wamid) {
+  if (!wamid) return null;
+  const rows = await sql`
+    SELECT response_text
+    FROM whatsapp_messages
+    WHERE wamid = ${wamid}
+    LIMIT 1
+  `;
+  return rows[0]?.response_text || null;
 }
 
 async function handleIncomingMessage(sql, env, phoneNumberId, message, options = {}) {
@@ -802,6 +900,11 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message, options =
     });
     return "Sender is not allowlisted.";
   }
+  const duplicateReply = await existingMessageReply(sql, extracted.wamid);
+  if (duplicateReply) {
+    console.log("duplicate_whatsapp_message", JSON.stringify({ provider: options.replyProvider || "meta", from: extracted.from, wamid: extracted.wamid }));
+    return duplicateReply;
+  }
 
   let transcript = "";
   if (extracted.type === "audio" || extracted.type === "voice") {
@@ -818,6 +921,7 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message, options =
   try {
     const history = await recentConversation(sql, extracted.from);
     const command = confirmationCommand(messageText);
+    const action = requestedAction(messageText);
     const draft = await activeDraft(sql, extracted.from);
     const effectiveText =
       messageText ||
@@ -828,8 +932,10 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message, options =
     if (messageText.toLowerCase() === "help" || messageText.toLowerCase().startsWith("/help")) {
       intent = "help";
       status = "answered";
-      responseText =
-        "Send property details in one message or many messages. I will keep a draft, accept docs/photos/location/voice notes, summarize it, and only move it to Approval Inbox when you reply CONFIRM. Ask questions like 'which Jaipur brokerage deals are high workability?' For existing updates, mention any recognizable property detail.";
+      responseText = [
+        "Send property details in one message or many messages. I keep a private draft and only move it to Approval Inbox when you reply CONFIRM.",
+        actionHelpText(),
+      ].join("\n\n");
     } else if (draft && command === "confirm") {
       intent = "confirm_draft";
       status = "queued";
@@ -853,11 +959,39 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message, options =
       status = "answered";
       approvalId = draft.id;
       responseText = draftSummary(draft.payload, draft.id);
+    } else if (draft && action === "create") {
+      intent = "draft_already_active";
+      status = "answered";
+      approvalId = draft.id;
+      responseText = [
+        "You already have an active private draft. I will not mix two properties in one draft.",
+        draftSummary(draft.payload, draft.id),
+        "Reply CONFIRM to move it to Approval Inbox, CANCEL to discard it, or continue sending details for this same property.",
+      ].join("\n\n");
+    } else if (!draft && (action === "create" || isStandaloneCollateral(extracted, effectiveText))) {
+      intent = action === "create" ? "start_draft" : "start_collateral_draft";
+      status = "draft";
+      const payload = hasPropertyDetailWords(effectiveText)
+        ? await openAiExtractLead(env, effectiveText, extracted.from)
+        : isStandaloneCollateral(extracted, effectiveText)
+          ? collateralDraftPayload(extracted, extracted.from, effectiveText)
+          : blankDraftPayload(extracted.from, effectiveText);
+      const updated = await upsertDraft(sql, extracted, extracted.from, payload, effectiveText);
+      approvalId = updated?.id || null;
+      responseText = [
+        action === "create"
+          ? "Started a private property draft. It will not enter Approval Inbox until you reply CONFIRM."
+          : "I saved this map/document as a private draft instead of attaching it to a guessed property.",
+        draftSummary(updated?.payload || payload, approvalId),
+      ].join("\n\n");
     } else {
       const candidates = await candidateAssets(sql, effectiveText, history);
       const decision = await routeWithOpenAi(env, effectiveText, extracted, candidates, history);
-      const asset = selectedAssetFromDecision(decision, candidates) || (decision.confidence >= 0.72 ? candidates[0] : null);
-      if (draft && !isQuestion(messageText) && (effectiveText || extracted.mediaId || extracted.latitude !== null)) {
+      const reference = assetReference(effectiveText);
+      const explicitAssetReference = Boolean(reference.code || reference.id);
+      const directAsset = explicitAssetReference ? await findAsset(sql, effectiveText) : null;
+      const safeAsset = directAsset || selectedAssetFromDecision(decision, candidates) || (explicitAssetReference ? candidates[0] : decision.confidence >= 0.9 ? candidates[0] : null);
+      if (draft && !action && !isQuestion(messageText) && (effectiveText || extracted.mediaId || extracted.latitude !== null)) {
         intent = "update_draft";
         status = "draft_updated";
         const payload =
@@ -867,22 +1001,32 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message, options =
         const updated = await upsertDraft(sql, extracted, extracted.from, payload, effectiveText);
         approvalId = updated?.id || draft.id;
         responseText = draftSummary(updated?.payload || payload, approvalId);
-      } else if (decision.intent === "query" || isQuestion(messageText)) {
+      } else if (action === "info" || decision.intent === "query" || isQuestion(messageText)) {
         intent = "query";
         status = "answered";
         responseText = decision.answer || (await answerQuestion(env, messageText, candidates, history));
-      } else if (decision.intent === "attach_document" && asset && extracted.mediaId && decision.confidence >= 0.72) {
+      } else if (action === "attach" && safeAsset && (extracted.mediaId || mapsLink(effectiveText)) && (explicitAssetReference || decision.confidence >= 0.9)) {
         intent = "attach_document";
         status = "attached_document";
-        assetId = asset.id;
-        await addAssetDocument(sql, asset, extracted, extracted.from);
-        responseText = `Attached WhatsApp media to ${asset.asset_code || asset.id}: ${asset.title}`;
-      } else if (decision.intent === "update_asset" && asset && messageText && decision.confidence >= 0.72) {
+        assetId = safeAsset.id;
+        await addAssetDocument(sql, safeAsset, extracted, extracted.from);
+        responseText = `Attached WhatsApp reference to ${safeAsset.asset_code || safeAsset.id}: ${safeAsset.title}`;
+      } else if (action === "attach" && (extracted.mediaId || mapsLink(effectiveText))) {
+        intent = "attach_needs_asset";
+        status = "answered";
+        const options = candidates.slice(0, 3).map((row) => `${row.asset_code || row.id}: ${row.title}`).join("\n");
+        responseText = `Which confirmed asset should I attach this to? Reply with ATTACH LJV-xxxxx or ATTACH asset <id>.${options ? `\nPossible matches:\n${options}` : ""}`;
+      } else if (action === "update" && safeAsset && messageText && (explicitAssetReference || decision.confidence >= 0.9)) {
         intent = "update_asset";
         status = "updated_asset";
-        assetId = asset.id;
-        await addAssetUpdate(sql, asset, decision.update_text || messageText, extracted.from, "whatsapp_conversation");
-        responseText = `Updated ${asset.asset_code || asset.id}: ${asset.title}`;
+        assetId = safeAsset.id;
+        await addAssetUpdate(sql, safeAsset, decision.update_text || messageText, extracted.from, "whatsapp_conversation");
+        responseText = `Updated ${safeAsset.asset_code || safeAsset.id}: ${safeAsset.title}`;
+      } else if (action === "update") {
+        intent = "update_needs_asset";
+        status = "answered";
+        const options = candidates.slice(0, 3).map((row) => `${row.asset_code || row.id}: ${row.title}`).join("\n");
+        responseText = `Which confirmed asset should I update? Reply with UPDATE LJV-xxxxx: <note> or UPDATE asset <id>: <note>.${options ? `\nPossible matches:\n${options}` : ""}`;
       } else if (decision.intent === "new_lead" || isNewLead(effectiveText, Boolean(extracted.mediaId || extracted.latitude !== null))) {
         intent = "draft_new_lead";
         status = "draft";
@@ -901,7 +1045,7 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message, options =
           decision.clarification_question ||
           (options
             ? `I found possible matches but I am not confident. Which one should I use?\n${options}`
-            : "I could not tell if this is a question, property update, or new lead. Send 'help' for examples, or add location/name/type.");
+            : `I am not sure whether you want to create, edit, attach, or search.\n\n${actionHelpText()}`);
       }
     }
   } catch (error) {

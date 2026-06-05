@@ -75,6 +75,34 @@ The bot will show the current extracted fields, documents count, map link when a
 
 Existing asset updates still work separately. If you mention a recognizable existing property, the bot can add a timeline update or attach media to that asset. When the match is uncertain, it asks for clarification.
 
+For ambiguous forwards, use explicit mode words:
+
+```text
+NEW
+```
+
+Starts a private draft. Documents, photos, map links, location pins, and voice notes after this are added to that draft.
+
+```text
+INFO show Queens Road JV opportunities
+```
+
+Searches the confirmed database without creating anything.
+
+```text
+UPDATE LJV-00029: spoke to broker, seller reduced price
+```
+
+Adds a timeline update to a confirmed asset.
+
+```text
+ATTACH LJV-00029
+```
+
+Attaches the current media/map reference to a confirmed asset. Without an explicit asset code/id, the bot asks you to clarify instead of guessing.
+
+Map-only or document-only forwards are saved as private drafts. They do not enter the Approval Inbox and they do not attach to a guessed asset unless you explicitly say `ATTACH <asset code>`.
+
 ## Deploy The Worker
 
 From the repo root:
