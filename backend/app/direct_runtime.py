@@ -444,6 +444,37 @@ def direct_request(method: str, path: str, *, params: dict[str, Any] | None = No
             db.refresh(contact)
             return {"id": contact.id, "name": contact.name}
 
+        if path == "/whatsapp/messages" and method == "GET":
+            limit = max(1, min(int(params.get("limit") or 200), 500))
+            stmt = select(models.WhatsAppMessage)
+            status_filter = params.get("status")
+            if status_filter:
+                stmt = stmt.where(models.WhatsAppMessage.processing_status == status_filter)
+            stmt = stmt.order_by(models.WhatsAppMessage.created_at.desc()).limit(limit)
+            return _jsonable(
+                [
+                    {
+                        "id": row.id,
+                        "wamid": row.wamid,
+                        "from_number": row.from_number,
+                        "message_type": row.message_type,
+                        "body_text": row.body_text,
+                        "transcription_text": row.transcription_text,
+                        "media_id": row.media_id,
+                        "media_filename": row.media_filename,
+                        "media_caption": row.media_caption,
+                        "intent": row.intent,
+                        "processing_status": row.processing_status,
+                        "approval_queue_id": row.approval_queue_id,
+                        "asset_id": row.asset_id,
+                        "response_text": row.response_text,
+                        "error_message": row.error_message,
+                        "created_at": row.created_at,
+                    }
+                    for row in db.scalars(stmt)
+                ]
+            )
+
         if path == "/approvals" and method == "GET":
             queue_status = params.get("status") or "pending"
             stmt = select(models.ApprovalQueue)

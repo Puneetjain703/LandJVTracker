@@ -2197,6 +2197,67 @@ def export_page() -> None:
         )
 
 
+def whatsapp_page() -> None:
+    page_hero(
+        "Field inbox",
+        "WhatsApp Intake",
+        "Review messages, voice transcriptions, media references, queued leads, and updates received from the WhatsApp bot.",
+        ["Webhook-ready", "Approval-first", "Voice notes", "Media captured"],
+    )
+    st.markdown(
+        """
+        <div class="note-panel">
+            New WhatsApp property leads should enter the approval queue first. Existing asset updates can be captured
+            against the property timeline when the message names an asset code or a clear match.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns([1, 2])
+    status_filter = c1.selectbox(
+        "Status",
+        ["", "received", "queued", "answered", "updated_asset", "attached_document", "ignored", "failed"],
+        format_func=lambda value: "Any status" if value == "" else labelize(value),
+    )
+    limit = c2.slider("Rows", min_value=25, max_value=500, value=150, step=25)
+    try:
+        rows = api("GET", "/whatsapp/messages", params=clean_payload({"status": status_filter, "limit": limit}))
+    except Exception as exc:
+        st.error(str(exc))
+        return
+    if not rows:
+        empty_panel("No WhatsApp messages logged yet. Deploy the Worker bridge, subscribe the webhook, then send a test message.")
+        return
+    df = pd.DataFrame(rows)
+    display_columns = [
+        "created_at",
+        "from_number",
+        "message_type",
+        "intent",
+        "processing_status",
+        "body_text",
+        "transcription_text",
+        "media_filename",
+        "approval_queue_id",
+        "asset_id",
+        "response_text",
+        "error_message",
+    ]
+    st.dataframe(
+        df[[column for column in display_columns if column in df.columns]],
+        use_container_width=True,
+        hide_index=True,
+        height=520,
+    )
+    with st.expander("Setup reminder", expanded=False):
+        st.markdown(
+            """
+            Deploy `whatsapp_worker` to Cloudflare Workers, set the Worker secrets, then set the Meta webhook callback
+            URL to `https://YOUR-WORKER.workers.dev/webhook`.
+            """
+        )
+
+
 def dashboard_page() -> None:
     page_hero(
         "Daily command center",
@@ -2352,7 +2413,7 @@ def main() -> None:
         st.caption(f"Signed in as {st.session_state.get('username', 'internal')}")
         page = st.radio(
             "Workspace",
-            ["Dashboard", "Property Copilot", "Assets", "Brokerage", "People", "Add / Edit", "Approvals", "Import", "Export", "Sync"],
+            ["Dashboard", "Property Copilot", "WhatsApp", "Assets", "Brokerage", "People", "Add / Edit", "Approvals", "Import", "Export", "Sync"],
         )
         st.divider()
         st.caption("Daily flow: sync, approve, update, export.")
@@ -2365,6 +2426,8 @@ def main() -> None:
         dashboard_page()
     elif page == "Property Copilot":
         copilot_page()
+    elif page == "WhatsApp":
+        whatsapp_page()
     elif page == "Assets":
         asset_list_page()
     elif page == "Brokerage":

@@ -27,6 +27,7 @@ EXPORT_MODELS: list[tuple[str, type]] = [
     ("asset_tags", models.AssetTag),
     ("approval_queue", models.ApprovalQueue),
     ("ingestion_logs", models.IngestionLog),
+    ("whatsapp_messages", models.WhatsAppMessage),
     ("notion_sync_logs", models.NotionSyncLog),
     ("crm_profiles", models.CrmProfile),
     ("match_suggestions", models.AssetMatchSuggestion),
@@ -115,4 +116,3 @@ def build_export_workbook(db: Session) -> bytes:
 
     output.seek(0)
     return output.read()
-

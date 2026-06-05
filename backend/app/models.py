@@ -251,6 +251,31 @@ class IngestionLog(TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text)
 
 
+class WhatsAppMessage(TimestampMixin, Base):
+    __tablename__ = "whatsapp_messages"
+    __table_args__ = (UniqueConstraint("wamid", name="uq_whatsapp_wamid"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    wamid: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    from_number: Mapped[str | None] = mapped_column(String(80), index=True)
+    phone_number_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    message_type: Mapped[str | None] = mapped_column(String(80))
+    body_text: Mapped[str | None] = mapped_column(Text)
+    transcription_text: Mapped[str | None] = mapped_column(Text)
+    media_id: Mapped[str | None] = mapped_column(String(255))
+    media_mime_type: Mapped[str | None] = mapped_column(String(255))
+    media_sha256: Mapped[str | None] = mapped_column(String(255))
+    media_filename: Mapped[str | None] = mapped_column(String(500))
+    media_caption: Mapped[str | None] = mapped_column(Text)
+    raw_payload: Mapped[dict | None] = mapped_column(JsonType)
+    intent: Mapped[str | None] = mapped_column(String(80))
+    processing_status: Mapped[str] = mapped_column(String(80), default="received", index=True)
+    approval_queue_id: Mapped[int | None] = mapped_column(ForeignKey("approval_queue.id"), index=True)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id"), index=True)
+    response_text: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
 class CrmProfile(TimestampMixin, Base):
     __tablename__ = "crm_profiles"
 
@@ -285,4 +310,3 @@ class AiQueryLog(TimestampMixin, Base):
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     source_rows: Mapped[list | None] = mapped_column(JsonType)
     asked_by: Mapped[str | None] = mapped_column(String(120))
-

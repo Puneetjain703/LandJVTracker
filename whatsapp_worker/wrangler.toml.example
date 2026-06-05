@@ -1,0 +1,20 @@
+name = "land-jv-whatsapp-bot"
+main = "src/index.js"
+compatibility_date = "2026-06-05"
+
+# Set secrets with:
+# npx wrangler secret put DATABASE_URL
+# npx wrangler secret put WHATSAPP_VERIFY_TOKEN
+# npx wrangler secret put WHATSAPP_ACCESS_TOKEN
+# npx wrangler secret put WHATSAPP_PHONE_NUMBER_ID
+# npx wrangler secret put WHATSAPP_APP_SECRET
+# npx wrangler secret put OPENAI_API_KEY
+
+[vars]
+OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_TRANSCRIPTION_MODEL = "whisper-1"
+AUTO_APPLY_EXISTING_ASSET_UPDATES = "true"
+REQUIRE_APPROVAL_FOR_NEW_ASSETS = "true"
+
+# Optional comma-separated allowlist in international format without +.
+# WHATSAPP_ALLOWED_SENDERS = "919999999999,918888888888"

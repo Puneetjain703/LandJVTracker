@@ -15,8 +15,9 @@ Production-minded MVP for an internal brokerage, land, JV, resale, RE asset, and
 - Placeholder source path for future WhatsApp ingestion
 - CRM matching foundation tables
 - People/institution relationship layer for brokers, landowners, partners, financiers, banks, referrers, and other roles on each asset
+- WhatsApp Cloud API bridge scaffold through Cloudflare Workers for text, voice-note, media-reference, lead queueing, and asset update workflows
 
-Personal WhatsApp account reading is not implemented in this MVP. The schema and approval queue are ready for future `whatsapp` lead extraction.
+Personal WhatsApp account reading is not implemented in this MVP. The WhatsApp bridge uses the official WhatsApp Business Cloud API and queues new leads for approval.
 
 ## Quick start
 
@@ -141,6 +142,12 @@ The sync is rerunnable. It uses each source row/page id plus a property fingerpr
 The `/ask` endpoint does not execute model-generated SQL. It performs a read-only retrieval of relevant asset rows, then asks OpenAI to summarize those rows if `OPENAI_API_KEY` is configured. Without an OpenAI key, it returns a deterministic fallback summary.
 
 Questions and answers are logged in `ai_query_logs`.
+
+## WhatsApp bot
+
+The WhatsApp bridge lives in [`whatsapp_worker`](whatsapp_worker) and is designed to deploy to Cloudflare Workers. It receives WhatsApp Cloud API webhooks, writes to Neon, queues new leads in Approval Inbox, and can update existing property timelines when a message mentions an asset code.
+
+Setup guide: [`docs/whatsapp-bot.md`](docs/whatsapp-bot.md)
 
 ## Editing and exporting
 
