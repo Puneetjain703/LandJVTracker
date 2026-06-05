@@ -18,8 +18,9 @@ If you want a third-party provider that gives/hosts the WhatsApp number and rela
 - Receive voice/audio messages and transcribe them when `OPENAI_API_KEY` is configured.
 - Use OpenAI to classify unstructured messages, search candidate assets, answer from database rows, and extract new lead fields.
 - Maintain a lightweight conversational flow by looking at recent WhatsApp messages from the same sender.
-- Queue new property/deal leads in `approval_queue` with `source='whatsapp'`.
-- Reply with the approval queue id.
+- Keep one active WhatsApp property draft per sender so you can send details, files, voice notes, and location in multiple messages.
+- Move a WhatsApp draft into the Approval Inbox only after you reply `CONFIRM`.
+- Reply with the draft id or approval queue id.
 - Answer simple search questions from the confirmed `assets` table.
 - Add timeline updates to an existing asset when the message mentions an asset code like `LJV-00012` or `asset 12`.
 - Fuzzy-match an existing asset even when you do not mention an asset id, then ask a clarification if confidence is low.
@@ -32,6 +33,47 @@ If you want a third-party provider that gives/hosts the WhatsApp number and rela
 - It uses the official WhatsApp Business Cloud API, which needs a WhatsApp Business number.
 - It does not permanently store media binaries yet. It records WhatsApp media ids and metadata. Add Cloudflare R2, S3, or Google Drive later for durable file storage.
 - It does not auto-approve new properties. New leads wait in Approval Inbox.
+- It does not push partial WhatsApp drafts into the visible approval list until you confirm the draft.
+
+## Conversational Intake
+
+You do not need to send everything in one message. The intended flow is:
+
+```text
+New land near Achrol, 5 bigha, suitable for farmhouse plotting, asking around 26 cr
+```
+
+Then send more messages as they come:
+
+```text
+Broker is Rakesh, owner is Sharma family, title papers need checking
+```
+
+Forward photos, PDFs, voice notes, or a WhatsApp location pin. The bot keeps merging them into the same active draft for your phone number.
+
+When the bot summary looks right:
+
+```text
+CONFIRM
+```
+
+That moves the property to the Streamlit Approval Inbox. From there you can approve it into the main asset database.
+
+To discard the active WhatsApp draft:
+
+```text
+CANCEL
+```
+
+To inspect the current draft:
+
+```text
+what is missing in this draft?
+```
+
+The bot will show the current extracted fields, documents count, map link when available, and missing fields such as owner, broker, price, area, or coordinates.
+
+Existing asset updates still work separately. If you mention a recognizable existing property, the bot can add a timeline update or attach media to that asset. When the match is uncertain, it asks for clarification.
 
 ## Deploy The Worker
 
@@ -197,7 +239,7 @@ The broker sent this map for the commercial plot near Mansarovar. Attach it to t
 New property messages:
 
 ```text
-whatsapp_messages -> approval_queue -> Approval Inbox -> assets
+whatsapp_messages -> approval_queue(status=draft) -> CONFIRM -> approval_queue(status=pending) -> Approval Inbox -> assets
 ```
 
 Existing asset updates:
