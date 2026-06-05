@@ -1,4 +1,5 @@
 from collections.abc import Generator
+import os
 import ssl
 
 from sqlalchemy import create_engine
@@ -38,6 +39,10 @@ def database_url_and_connect_args() -> tuple[str, dict]:
     connect_args: dict = {}
     if url.startswith("postgresql+pg8000://"):
         url_obj = make_url(url)
+        if str(os.getenv("DATABASE_DISABLE_NEON_POOLER") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            host = url_obj.host or ""
+            if "-pooler." in host and host.endswith(".neon.tech"):
+                url_obj = url_obj.set(host=host.replace("-pooler.", ".", 1))
         query = {key: value for key, value in url_obj.query.items()}
         sslmode = query.pop("sslmode", None)
         query.pop("channel_binding", None)
