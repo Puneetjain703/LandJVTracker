@@ -557,6 +557,7 @@ async function logMessage(sql, record) {
 
 async function handleIncomingMessage(sql, env, phoneNumberId, message, options = {}) {
   const extracted = extractMessage(message);
+  console.log("incoming_whatsapp_message", JSON.stringify({ provider: options.replyProvider || "meta", from: extracted.from, type: extracted.type, wamid: extracted.wamid }));
   const allowed = cleanText(env.WHATSAPP_ALLOWED_SENDERS || "")
     .split(",")
     .map((value) => cleanText(value))
@@ -660,6 +661,7 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message, options =
   });
 
   if (responseText && options.replyProvider !== "twilio") await sendWhatsAppText(env, extracted.from, responseText);
+  console.log("whatsapp_message_processed", JSON.stringify({ provider: options.replyProvider || "meta", from: extracted.from, intent, status, assetId, approvalId, replyLength: responseText.length }));
   return responseText;
 }
 
@@ -715,11 +717,14 @@ function twimlResponse(body) {
 async function handleTwilioPost(request, env) {
   const rawBody = await request.text();
   const params = new URLSearchParams(rawBody);
-  if (!(await verifyTwilioSignature(request, env, params))) return text("Invalid Twilio signature", 403);
+  const signatureOk = await verifyTwilioSignature(request, env, params);
+  console.log("twilio_webhook_received", JSON.stringify({ signatureOk, from: params.get("From"), bodyLength: cleanText(params.get("Body")).length, mediaCount: params.get("NumMedia") || "0" }));
+  if (!signatureOk) return twimlResponse("Webhook signature did not validate. Check TWILIO_WEBHOOK_URL exactly matches the Twilio webhook URL.");
   const sql = sqlClient(env);
   await ensureSchema(sql);
   const message = twilioMessageFromParams(params);
   const reply = await handleIncomingMessage(sql, env, cleanText(params.get("To")).replace(/^whatsapp:/, ""), message, { replyProvider: "twilio" });
+  console.log("twilio_reply", JSON.stringify({ to: params.get("From"), reply: String(reply || "Received.").slice(0, 240) }));
   return twimlResponse(reply || "Received.");
 }
 
@@ -727,6 +732,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/health") return json({ status: "ok", service: "land-jv-whatsapp-bot" });
+    if (url.pathname === "/twilio/ping") return twimlResponse("Land JV WhatsApp bot is online.");
     if (url.pathname === "/twilio/webhook") {
       if (request.method === "POST") return handleTwilioPost(request, env);
       return text("Method not allowed", 405);
