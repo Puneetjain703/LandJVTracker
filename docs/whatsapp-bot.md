@@ -10,14 +10,19 @@ WhatsApp Cloud API -> Cloudflare Worker -> Neon Postgres -> Streamlit Approval I
 
 Streamlit remains the dashboard. The Worker is only the public webhook doorway required by WhatsApp.
 
+If you want a third-party provider that gives/hosts the WhatsApp number and relays messages to your webhook, the common names are Twilio, Gupshup, 360dialog, WATI, Interakt, Vonage, and Bird/MessageBird. Twilio is the one most people remember as "they give me a number and POST messages to my webhook"; this Worker supports a Twilio-compatible endpoint.
+
 ## What It Can Do
 
 - Receive WhatsApp text messages.
 - Receive voice/audio messages and transcribe them when `OPENAI_API_KEY` is configured.
+- Use OpenAI to classify unstructured messages, search candidate assets, answer from database rows, and extract new lead fields.
+- Maintain a lightweight conversational flow by looking at recent WhatsApp messages from the same sender.
 - Queue new property/deal leads in `approval_queue` with `source='whatsapp'`.
 - Reply with the approval queue id.
 - Answer simple search questions from the confirmed `assets` table.
 - Add timeline updates to an existing asset when the message mentions an asset code like `LJV-00012` or `asset 12`.
+- Fuzzy-match an existing asset even when you do not mention an asset id, then ask a clarification if confidence is low.
 - Attach WhatsApp media references to an existing asset when a media message mentions a matched asset.
 - Log every received WhatsApp message in `whatsapp_messages`.
 
@@ -109,6 +114,40 @@ https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/webhook
 5. Subscribe to the `messages` webhook field.
 6. Send a test WhatsApp message to the business number.
 
+## Twilio Setup
+
+If you use Twilio WhatsApp, set the inbound message webhook URL to:
+
+```text
+https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/twilio/webhook
+```
+
+Use HTTP `POST`.
+
+Twilio sends text in `Body`, sender in `From`, and media links in fields such as `MediaUrl0`. The Worker replies with TwiML, so you do not need the Meta `WHATSAPP_ACCESS_TOKEN` just to respond through Twilio.
+
+For Twilio-only mode, required Worker secrets are:
+
+```text
+DATABASE_URL
+OPENAI_API_KEY
+```
+
+Recommended:
+
+```text
+WHATSAPP_ALLOWED_SENDERS
+```
+
+The Meta-specific secrets are only needed for direct Meta Cloud API mode:
+
+```text
+WHATSAPP_VERIFY_TOKEN
+WHATSAPP_ACCESS_TOKEN
+WHATSAPP_PHONE_NUMBER_ID
+WHATSAPP_APP_SECRET
+```
+
 Useful first messages:
 
 ```text
@@ -125,6 +164,20 @@ Update LJV-00012: spoke to broker Rakesh today. Seller revised asking to 16 cr a
 
 ```text
 Show active brokerage properties in Jaipur
+```
+
+Natural-language examples that should work without asset IDs:
+
+```text
+Which Vaishali Nagar brokerage opportunities have high workability but missing owner details?
+```
+
+```text
+I spoke to Rakesh about the Ajmer Road 12 bigha land. Seller has reduced ask to 16 cr but title papers are still pending.
+```
+
+```text
+The broker sent this map for the commercial plot near Mansarovar. Attach it to the right property if you can identify it.
 ```
 
 ## How Data Flows

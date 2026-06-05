@@ -18,3 +18,7 @@ REQUIRE_APPROVAL_FOR_NEW_ASSETS = "true"
 
 # Optional comma-separated allowlist in international format without +.
 # WHATSAPP_ALLOWED_SENDERS = "919999999999,918888888888"
+
+# Webhook routes after deploy:
+# Meta Cloud API: https://YOUR-WORKER.workers.dev/webhook
+# Twilio WhatsApp: https://YOUR-WORKER.workers.dev/twilio/webhook

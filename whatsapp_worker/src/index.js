@@ -21,6 +21,14 @@ function cleanText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function tokensForSearch(value) {
+  return cleanText(value)
+    .toLowerCase()
+    .split(/[^a-z0-9/-]+/)
+    .filter((token) => token.length > 2 && !["the", "and", "for", "with", "that", "this"].includes(token))
+    .slice(0, 18);
+}
+
 function normalizeAssetType(value, fallback = "land") {
   const text = cleanText(value).toLowerCase();
   if (!text) return fallback;
@@ -128,11 +136,11 @@ async function mediaMetadata(env, mediaId) {
 
 async function transcribeAudio(env, mediaId) {
   if (!env.OPENAI_API_KEY || !mediaId) return "";
-  const meta = await mediaMetadata(env, mediaId);
+  const isUrl = String(mediaId).startsWith("http://") || String(mediaId).startsWith("https://");
+  const meta = isUrl ? { url: mediaId, mime_type: "audio/ogg" } : await mediaMetadata(env, mediaId);
   if (!meta.url) return "";
-  const mediaResponse = await fetch(meta.url, {
-    headers: { authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}` },
-  });
+  const headers = isUrl || !env.WHATSAPP_ACCESS_TOKEN ? {} : { authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}` };
+  const mediaResponse = await fetch(meta.url, { headers });
   if (!mediaResponse.ok) return "";
   const blob = await mediaResponse.blob();
   const form = new FormData();
@@ -200,6 +208,88 @@ async function findAsset(sql, messageText) {
   return rows[0] || null;
 }
 
+async function recentConversation(sql, from, limit = 8) {
+  if (!from) return [];
+  return await sql`
+    SELECT body_text, transcription_text, intent, response_text, created_at
+    FROM whatsapp_messages
+    WHERE from_number = ${from}
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `;
+}
+
+function scoreAsset(row, tokens) {
+  const haystack = cleanText(
+    [
+      row.asset_code,
+      row.title,
+      row.asset_type,
+      row.status,
+      row.locality,
+      row.area_name,
+      row.district,
+      row.address,
+      row.owner_name,
+      row.broker_name,
+      row.people_summary,
+      row.bottleneck_notes,
+    ].join(" ")
+  ).toLowerCase();
+  let score = 0;
+  for (const token of tokens) {
+    if (haystack.includes(token)) score += token.length > 5 ? 3 : 1;
+  }
+  if (row.asset_code && tokens.includes(String(row.asset_code).toLowerCase())) score += 20;
+  return score;
+}
+
+async function candidateAssets(sql, messageText, history = [], limit = 12) {
+  const reference = assetReference(messageText);
+  const rows = await sql`
+    SELECT
+      a.id,
+      a.asset_code,
+      a.title,
+      a.asset_type,
+      a.status,
+      a.locality,
+      a.area_name,
+      a.district,
+      a.address,
+      a.land_area,
+      a.asking_price,
+      a.expected_price,
+      a.workability_rating,
+      a.bottleneck_rating,
+      left(coalesce(a.bottleneck_notes, ''), 700) AS bottleneck_notes,
+      o.name AS owner_name,
+      b.name AS broker_name,
+      COALESCE(string_agg(DISTINCT c.name || ' (' || ac.relationship_type || ')', ' | '), '') AS people_summary,
+      a.updated_at
+    FROM assets a
+    LEFT JOIN owners o ON o.id = a.owner_id
+    LEFT JOIN brokers b ON b.id = a.broker_id
+    LEFT JOIN asset_contacts ac ON ac.asset_id = a.id
+    LEFT JOIN contacts c ON c.id = ac.contact_id
+    GROUP BY a.id, o.name, b.name
+    ORDER BY a.updated_at DESC
+    LIMIT 500
+  `;
+  const historyText = history.map((item) => `${item.body_text || ""} ${item.transcription_text || ""}`).join(" ");
+  const tokens = tokensForSearch(`${messageText} ${historyText}`);
+  const scored = rows
+    .map((row) => {
+      let score = scoreAsset(row, tokens);
+      if (reference.code && row.asset_code === reference.code) score += 100;
+      if (reference.id && row.id === reference.id) score += 100;
+      return { ...row, match_score: score };
+    })
+    .filter((row) => row.match_score > 0 || reference.code || reference.id)
+    .sort((left, right) => right.match_score - left.match_score || new Date(right.updated_at) - new Date(left.updated_at));
+  return scored.slice(0, limit);
+}
+
 function isQuestion(textValue) {
   const lower = textValue.toLowerCase();
   return lower.includes("?") || /^(what|which|show|find|search|list|tell|who|where|kitne|kaun|kya)\b/.test(lower);
@@ -213,22 +303,47 @@ function isNewLead(textValue, hasMediaWithoutAsset) {
   );
 }
 
-async function answerQuestion(sql, textValue) {
-  const tokens = cleanText(textValue)
-    .toLowerCase()
-    .split(/[^a-z0-9/-]+/)
-    .filter((token) => token.length > 2)
-    .slice(0, 10);
-  const search = `%${tokens.join("%")}%`;
-  const rows = await sql`
-    SELECT id, asset_code, title, asset_type, status, locality, district, asking_price, workability_rating, bottleneck_rating
-    FROM assets
-    WHERE ${tokens.length === 0} OR lower(coalesce(asset_code, '') || ' ' || coalesce(title, '') || ' ' || coalesce(locality, '') || ' ' || coalesce(district, '') || ' ' || coalesce(status, '')) LIKE ${search}
-    ORDER BY updated_at DESC
-    LIMIT 5
-  `;
-  if (!rows.length) return "I could not find a matching property yet. Try an asset code, locality, owner, broker, or project name.";
-  return rows
+async function openAiJson(env, system, user) {
+  if (!env.OPENAI_API_KEY) return null;
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: env.OPENAI_MODEL || "gpt-4.1-mini",
+      response_format: { type: "json_object" },
+      temperature: 0,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
+  });
+  if (!response.ok) return null;
+  const data = await response.json();
+  try {
+    return JSON.parse(data.choices?.[0]?.message?.content || "{}");
+  } catch (_) {
+    return null;
+  }
+}
+
+async function answerQuestion(env, textValue, candidates, history) {
+  if (!candidates.length) return "I could not find a matching property yet. Try a locality, owner, broker, project name, or send more details.";
+  const ai = await openAiJson(
+    env,
+    "You answer questions for an internal Indian real-estate tracker. Answer only from candidate asset rows and conversation history. Be concise, include asset codes/ids, and say when uncertain. Return JSON with keys answer and cited_asset_ids.",
+    JSON.stringify({
+      question: textValue,
+      recent_whatsapp_context: history,
+      candidate_assets: candidates,
+    })
+  );
+  if (ai?.answer) return cleanText(ai.answer).slice(0, 3900);
+  return candidates
+    .slice(0, 5)
     .map((row) => {
       const price = row.asking_price ? ` | ask ${Number(row.asking_price).toLocaleString("en-IN")}` : "";
       return `${row.asset_code || row.id}: ${row.title} | ${row.asset_type} | ${row.locality || "-"}, ${row.district || "-"}${price}`;
@@ -273,41 +388,67 @@ function fallbackLeadPayload(textValue, from, extracted = {}) {
 }
 
 async function openAiExtractLead(env, textValue, from) {
-  if (!env.OPENAI_API_KEY) return fallbackLeadPayload(textValue, from);
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model: env.OPENAI_MODEL || "gpt-4.1-mini",
-      response_format: { type: "json_object" },
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Extract one Indian real-estate property/deal lead from WhatsApp text. Return JSON only. Valid asset_type: land, jv, brokerage_listing, commercial, resale_unit, rental, other. Do not invent missing facts.",
-        },
-        {
-          role: "user",
-          content:
-            `Text: ${textValue}\n\nFields: title, asset_type, status, locality, area_name, tehsil, district, state, address, latitude, longitude, google_maps_link, land_area, built_up_area, asking_price, expected_price, owner_name, broker_name, workability_rating, bottleneck_rating, bottleneck_notes, legal_status, zoning_status, key_people.`,
-        },
-      ],
-    }),
-  });
-  if (!response.ok) return fallbackLeadPayload(textValue, from);
-  const data = await response.json();
-  let parsed = {};
-  try {
-    parsed = JSON.parse(data.choices?.[0]?.message?.content || "{}");
-  } catch (_) {
-    parsed = {};
-  }
+  const parsed =
+    (await openAiJson(
+      env,
+      "Extract one Indian real-estate property/deal lead from WhatsApp text. Return JSON only. Valid asset_type: land, jv, brokerage_listing, commercial, resale_unit, rental, other. Do not invent missing facts.",
+      `Text: ${textValue}\n\nFields: title, asset_type, status, locality, area_name, tehsil, district, state, address, latitude, longitude, google_maps_link, land_area, built_up_area, asking_price, expected_price, owner_name, broker_name, workability_rating, bottleneck_rating, bottleneck_notes, legal_status, zoning_status, key_people.`
+    )) || {};
   parsed.__source = "openai";
   return fallbackLeadPayload(textValue, from, parsed);
+}
+
+async function routeWithOpenAi(env, messageText, extracted, candidates, history) {
+  const fallbackIntent = isQuestion(messageText)
+    ? "query"
+    : candidates.length && extracted.mediaId
+      ? "attach_document"
+      : candidates.length
+        ? "update_asset"
+        : isNewLead(messageText, Boolean(extracted.mediaId))
+          ? "new_lead"
+          : "needs_clarification";
+  const ai = await openAiJson(
+    env,
+    [
+      "You are a WhatsApp copilot for an internal land/JV/brokerage database.",
+      "Classify the message and choose safe database actions.",
+      "The user may be vague and may not know asset IDs. Use candidate assets and recent conversation context.",
+      "Return JSON only with keys: intent, selected_asset_id, confidence, answer, lead_fields, update_text, contact, document_notes, clarification_question.",
+      "Valid intent: query, new_lead, update_asset, attach_document, help, needs_clarification.",
+      "Never invent facts. If selected_asset_id is uncertain, set confidence below 0.72 and ask a clarification.",
+      "New leads must be approval-first; do not directly insert into assets.",
+    ].join(" "),
+    JSON.stringify({
+      message: messageText,
+      message_type: extracted.type,
+      media: {
+        media_id: extracted.mediaId,
+        filename: extracted.mediaFilename,
+        caption: extracted.mediaCaption,
+        mime_type: extracted.mediaMimeType,
+      },
+      recent_whatsapp_context: history,
+      candidate_assets: candidates,
+    })
+  );
+  if (!ai) return { intent: fallbackIntent, selected_asset_id: candidates[0]?.id || null, confidence: candidates[0] ? 0.6 : 0 };
+  return {
+    intent: ai.intent || fallbackIntent,
+    selected_asset_id: Number(ai.selected_asset_id || 0) || null,
+    confidence: Number(ai.confidence || 0),
+    answer: cleanText(ai.answer || ""),
+    lead_fields: ai.lead_fields || {},
+    update_text: cleanText(ai.update_text || messageText),
+    contact: ai.contact || null,
+    document_notes: cleanText(ai.document_notes || ""),
+    clarification_question: cleanText(ai.clarification_question || ""),
+  };
+}
+
+function selectedAssetFromDecision(decision, candidates) {
+  if (!decision.selected_asset_id) return null;
+  return candidates.find((row) => Number(row.id) === Number(decision.selected_asset_id)) || null;
 }
 
 async function queueApproval(sql, message, from, payload) {
@@ -337,10 +478,10 @@ async function queueApproval(sql, message, from, payload) {
   return rows[0]?.id;
 }
 
-async function addAssetUpdate(sql, asset, messageText, from) {
+async function addAssetUpdate(sql, asset, messageText, from, updateType = "whatsapp_note") {
   await sql`
     INSERT INTO asset_updates (asset_id, update_type, update_text, created_by)
-    VALUES (${asset.id}, 'whatsapp_note', ${messageText}, ${`whatsapp:${from}`})
+    VALUES (${asset.id}, ${updateType}, ${messageText}, ${`whatsapp:${from}`})
   `;
 }
 
@@ -375,7 +516,7 @@ async function logMessage(sql, record) {
   `;
 }
 
-async function handleIncomingMessage(sql, env, phoneNumberId, message) {
+async function handleIncomingMessage(sql, env, phoneNumberId, message, options = {}) {
   const extracted = extractMessage(message);
   const allowed = cleanText(env.WHATSAPP_ALLOWED_SENDERS || "")
     .split(",")
@@ -393,7 +534,7 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message) {
       processing_status: "ignored",
       response_text: "Sender is not allowlisted.",
     });
-    return;
+    return "Sender is not allowlisted.";
   }
 
   let transcript = "";
@@ -409,38 +550,48 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message) {
   let errorMessage = null;
 
   try {
-    const asset = await findAsset(sql, messageText);
+    const history = await recentConversation(sql, extracted.from);
+    const candidates = await candidateAssets(sql, messageText || extracted.mediaCaption || "", history);
+    const decision = await routeWithOpenAi(env, messageText || extracted.mediaCaption || "", extracted, candidates, history);
+    const asset = selectedAssetFromDecision(decision, candidates) || (decision.confidence >= 0.72 ? candidates[0] : null);
     if (messageText.toLowerCase() === "help" || messageText.toLowerCase().startsWith("/help")) {
       intent = "help";
       status = "answered";
       responseText =
-        "Send a property note to queue a lead. Mention LJV-xxxxx or asset 123 to update an existing property. Send questions like 'show active Vaishali Nagar brokerage'. Voice notes are transcribed when OPENAI_API_KEY is set.";
-    } else if (isQuestion(messageText)) {
+        "Send a property note to queue a lead. Ask natural questions like 'which Jaipur brokerage deals are high workability?' For updates, mention any recognizable property detail; I will search and ask if unsure. Voice notes are transcribed when OPENAI_API_KEY is set.";
+    } else if (decision.intent === "query" || isQuestion(messageText)) {
       intent = "query";
       status = "answered";
-      responseText = await answerQuestion(sql, messageText);
-    } else if (asset && extracted.mediaId) {
+      responseText = decision.answer || (await answerQuestion(env, messageText, candidates, history));
+    } else if (decision.intent === "attach_document" && asset && extracted.mediaId && decision.confidence >= 0.72) {
       intent = "attach_document";
       status = "attached_document";
       assetId = asset.id;
       await addAssetDocument(sql, asset, extracted, extracted.from);
       responseText = `Attached WhatsApp media to ${asset.asset_code || asset.id}: ${asset.title}`;
-    } else if (asset && messageText) {
+    } else if (decision.intent === "update_asset" && asset && messageText && decision.confidence >= 0.72) {
       intent = "update_asset";
       status = "updated_asset";
       assetId = asset.id;
-      await addAssetUpdate(sql, asset, messageText, extracted.from);
+      await addAssetUpdate(sql, asset, decision.update_text || messageText, extracted.from, "whatsapp_conversation");
       responseText = `Updated ${asset.asset_code || asset.id}: ${asset.title}`;
-    } else if (isNewLead(messageText, Boolean(extracted.mediaId))) {
+    } else if (decision.intent === "new_lead" || isNewLead(messageText, Boolean(extracted.mediaId))) {
       intent = "queue_new_lead";
       status = "queued";
-      const payload = await openAiExtractLead(env, messageText || extracted.mediaCaption || "WhatsApp media lead", extracted.from);
+      const payload = decision.lead_fields && Object.keys(decision.lead_fields).length
+        ? fallbackLeadPayload(messageText || extracted.mediaCaption || "WhatsApp media lead", extracted.from, { ...decision.lead_fields, __source: "openai_router" })
+        : await openAiExtractLead(env, messageText || extracted.mediaCaption || "WhatsApp media lead", extracted.from);
       approvalId = await queueApproval(sql, extracted, extracted.from, payload);
       responseText = `Queued for approval #${approvalId}: ${payload.title || "WhatsApp property lead"}. Open Approval Inbox to review before it enters assets.`;
     } else {
       intent = "needs_clarification";
       status = "answered";
-      responseText = "I could not tell if this is a question, property update, or new lead. Send 'help' for examples, or include an asset code like LJV-00001.";
+      const options = candidates.slice(0, 3).map((row) => `${row.asset_code || row.id}: ${row.title}`).join("\n");
+      responseText =
+        decision.clarification_question ||
+        (options
+          ? `I found possible matches but I am not confident. Which one should I use?\n${options}`
+          : "I could not tell if this is a question, property update, or new lead. Send 'help' for examples, or add location/name/type.");
     }
   } catch (error) {
     status = "failed";
@@ -469,7 +620,8 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message) {
     error_message: errorMessage,
   });
 
-  if (responseText) await sendWhatsAppText(env, extracted.from, responseText);
+  if (responseText && options.replyProvider !== "twilio") await sendWhatsAppText(env, extracted.from, responseText);
+  return responseText;
 }
 
 async function handlePost(request, env) {
@@ -492,10 +644,52 @@ async function handlePost(request, env) {
   return text("EVENT_RECEIVED");
 }
 
+function twilioMessageFromForm(form) {
+  const from = cleanText(form.get("From")).replace(/^whatsapp:/, "").replace(/^\+/, "");
+  const body = cleanText(form.get("Body"));
+  const mediaUrl = cleanText(form.get("MediaUrl0"));
+  const mediaType = cleanText(form.get("MediaContentType0"));
+  const messageSid = cleanText(form.get("MessageSid") || form.get("SmsMessageSid") || crypto.randomUUID());
+  return {
+    id: `twilio:${messageSid}`,
+    from,
+    type: mediaUrl ? (mediaType.startsWith("audio/") ? "audio" : mediaType.includes("pdf") ? "document" : "image") : "text",
+    text: { body },
+    image: mediaUrl ? { id: mediaUrl, mime_type: mediaType, caption: body } : undefined,
+    audio: mediaUrl ? { id: mediaUrl, mime_type: mediaType, caption: body } : undefined,
+    document: mediaUrl ? { id: mediaUrl, mime_type: mediaType, filename: cleanText(form.get("MediaUrl0")).split("/").pop(), caption: body } : undefined,
+    twilio: Object.fromEntries(form.entries()),
+  };
+}
+
+function twimlResponse(body) {
+  const escaped = String(body || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+  return new Response(`<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escaped}</Message></Response>`, {
+    status: 200,
+    headers: { "content-type": "text/xml; charset=utf-8" },
+  });
+}
+
+async function handleTwilioPost(request, env) {
+  const form = await request.formData();
+  const sql = sqlClient(env);
+  await ensureSchema(sql);
+  const message = twilioMessageFromForm(form);
+  const reply = await handleIncomingMessage(sql, env, cleanText(form.get("To")).replace(/^whatsapp:/, ""), message, { replyProvider: "twilio" });
+  return twimlResponse(reply || "Received.");
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/health") return json({ status: "ok", service: "land-jv-whatsapp-bot" });
+    if (url.pathname === "/twilio/webhook") {
+      if (request.method === "POST") return handleTwilioPost(request, env);
+      return text("Method not allowed", 405);
+    }
     if (url.pathname !== "/webhook") return text("Not found", 404);
 
     if (request.method === "GET") {
