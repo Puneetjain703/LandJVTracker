@@ -37,6 +37,10 @@ GOOGLE_SERVICE_ACCOUNT_JSON = "optional"
 
 Do not set `API_BASE_URL` for Streamlit-only mode. If `API_BASE_URL` is present, the UI assumes you intentionally want a separate FastAPI backend.
 
+Use the full connection string copied from Neon whenever possible. If you manually paste a password into the URL, encode symbols first. For example, `@` becomes `%40`, `#` becomes `%23`, `/` becomes `%2F`, `?` becomes `%3F`, `%` becomes `%25`, and `&` becomes `%26`. A malformed password in the URL can look exactly like a wrong-password error.
+
+After changing Streamlit secrets, reboot the app from Streamlit Cloud so the running container reloads them.
+
 For Google Sheets sync, also set:
 
 ```toml

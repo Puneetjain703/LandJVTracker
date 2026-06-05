@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from urllib.parse import urlsplit
 from pathlib import Path
 from html import escape
 from typing import Any
@@ -56,11 +57,9 @@ def secret_value(name: str) -> Any:
 
 def sync_streamlit_secrets_to_env() -> None:
     for key in SECRET_ENV_KEYS:
-        if os.getenv(key):
-            continue
         value = secret_value(key)
         if value is not None:
-            os.environ[key] = str(value)
+            os.environ[key] = str(value).strip()
 
 
 sync_streamlit_secrets_to_env()
@@ -547,18 +546,50 @@ def _direct_user() -> str:
     return st.session_state.get("username") or "streamlit"
 
 
+def _redacted_database_target() -> str:
+    raw_url = os.getenv("DATABASE_URL") or str(secret_value("DATABASE_URL") or "")
+    if not raw_url:
+        return "DATABASE_URL is not set"
+    try:
+        parsed = urlsplit(raw_url)
+        user = parsed.username or "-"
+        host = parsed.hostname or "-"
+        database = parsed.path.lstrip("/") or "-"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{user}:***@{host}{port}/{database}"
+    except Exception:
+        return "DATABASE_URL is set but could not be parsed for diagnostics"
+
+
+def _direct_error(exc: Exception) -> RuntimeError:
+    message = str(exc)
+    lower = message.lower()
+    if "password authentication failed" in lower or "28p01" in lower:
+        message += (
+            "\n\nDatabase login failed. The app is using this redacted target: "
+            f"{_redacted_database_target()}. "
+            "If that target is not exactly your current Neon host/user/database, Streamlit is still using stale secrets. "
+            "If it is correct, copy the full Neon connection string again rather than manually pasting only the password. "
+            "Passwords containing symbols like @, #, /, ?, %, or & must be URL-encoded in DATABASE_URL."
+        )
+    return RuntimeError(message)
+
+
 def api(method: str, path: str, **kwargs: Any) -> Any:
     if DIRECT_MODE:
-        from backend.app.direct_runtime import direct_request
+        try:
+            from backend.app.direct_runtime import direct_request
 
-        return direct_request(
-            method,
-            path,
-            params=kwargs.get("params"),
-            json_payload=kwargs.get("json"),
-            files=kwargs.get("files"),
-            user=_direct_user(),
-        )
+            return direct_request(
+                method,
+                path,
+                params=kwargs.get("params"),
+                json_payload=kwargs.get("json"),
+                files=kwargs.get("files"),
+                user=_direct_user(),
+            )
+        except Exception as exc:
+            raise _direct_error(exc) from exc
     timeout = kwargs.pop("timeout", 60)
     response = requests.request(method, f"{API_BASE_URL}{path}", headers=_headers(), timeout=timeout, **kwargs)
     if response.status_code == 401:
@@ -578,9 +609,12 @@ def api(method: str, path: str, **kwargs: Any) -> Any:
 
 def api_bytes(method: str, path: str, **kwargs: Any) -> bytes:
     if DIRECT_MODE:
-        from backend.app.direct_runtime import direct_bytes
+        try:
+            from backend.app.direct_runtime import direct_bytes
 
-        return direct_bytes(method, path, user=_direct_user(), **kwargs)
+            return direct_bytes(method, path, user=_direct_user(), **kwargs)
+        except Exception as exc:
+            raise _direct_error(exc) from exc
     response = requests.request(method, f"{API_BASE_URL}{path}", headers=_headers(), timeout=120, **kwargs)
     if response.status_code == 401:
         st.session_state.pop("token", None)
@@ -593,9 +627,12 @@ def api_bytes(method: str, path: str, **kwargs: Any) -> bytes:
 
 def api_form(path: str, data: dict[str, Any], uploads: list[dict[str, Any]] | None = None) -> Any:
     if DIRECT_MODE:
-        from backend.app.direct_runtime import direct_form
+        try:
+            from backend.app.direct_runtime import direct_form
 
-        return direct_form(path, data, uploads, user=_direct_user())
+            return direct_form(path, data, uploads, user=_direct_user())
+        except Exception as exc:
+            raise _direct_error(exc) from exc
     files = [
         ("files", (upload["name"], upload["bytes"], upload.get("type") or "application/octet-stream"))
         for upload in uploads or []
