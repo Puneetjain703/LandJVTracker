@@ -131,13 +131,25 @@ For Twilio-only mode, required Worker secrets are:
 ```text
 DATABASE_URL
 OPENAI_API_KEY
+TWILIO_ACCOUNT_SID
+TWILIO_AUTH_TOKEN
+TWILIO_WEBHOOK_URL
 ```
 
 Recommended:
 
 ```text
 WHATSAPP_ALLOWED_SENDERS
+TWILIO_VALIDATE_SIGNATURE=true
 ```
+
+`TWILIO_WEBHOOK_URL` must exactly match the URL you paste into Twilio, for example:
+
+```text
+https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev/twilio/webhook
+```
+
+The Worker validates Twilio's `X-Twilio-Signature` when `TWILIO_AUTH_TOKEN` is present. `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` are also used to fetch Twilio media URLs for voice transcription.
 
 The Meta-specific secrets are only needed for direct Meta Cloud API mode:
 

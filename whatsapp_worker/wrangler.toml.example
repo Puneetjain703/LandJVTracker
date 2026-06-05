@@ -9,12 +9,16 @@ compatibility_date = "2026-06-05"
 # npx wrangler secret put WHATSAPP_PHONE_NUMBER_ID
 # npx wrangler secret put WHATSAPP_APP_SECRET
 # npx wrangler secret put OPENAI_API_KEY
+# npx wrangler secret put TWILIO_ACCOUNT_SID
+# npx wrangler secret put TWILIO_AUTH_TOKEN
+# npx wrangler secret put TWILIO_WEBHOOK_URL
 
 [vars]
 OPENAI_MODEL = "gpt-4.1-mini"
 OPENAI_TRANSCRIPTION_MODEL = "whisper-1"
 AUTO_APPLY_EXISTING_ASSET_UPDATES = "true"
 REQUIRE_APPROVAL_FOR_NEW_ASSETS = "true"
+TWILIO_VALIDATE_SIGNATURE = "true"
 
 # Optional comma-separated allowlist in international format without +.
 # WHATSAPP_ALLOWED_SENDERS = "919999999999,918888888888"

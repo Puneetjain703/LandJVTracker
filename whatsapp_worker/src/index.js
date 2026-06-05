@@ -64,6 +64,41 @@ async function verifyMetaSignature(request, env, rawBody) {
   return signature.length === expected.length && signature === expected;
 }
 
+function base64FromBytes(bytes) {
+  let binary = "";
+  for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+async function hmacSha1Base64(secret, value) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"]
+  );
+  return base64FromBytes(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value)));
+}
+
+async function verifyTwilioSignature(request, env, params) {
+  if (!env.TWILIO_AUTH_TOKEN || boolEnv(env.TWILIO_VALIDATE_SIGNATURE) === false) return true;
+  const provided = request.headers.get("x-twilio-signature") || "";
+  if (!provided) return false;
+  const webhookUrl = env.TWILIO_WEBHOOK_URL || request.url;
+  const sorted = [...params.entries()].sort(([left], [right]) => left.localeCompare(right));
+  const basis = sorted.reduce((current, [key, value]) => current + key + value, webhookUrl);
+  const expected = await hmacSha1Base64(env.TWILIO_AUTH_TOKEN, basis);
+  return provided.length === expected.length && provided === expected;
+}
+
+function twilioMediaHeaders(env, mediaUrl) {
+  if (!String(mediaUrl || "").includes("api.twilio.com") || !env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) return {};
+  return {
+    authorization: `Basic ${btoa(`${env.TWILIO_ACCOUNT_SID}:${env.TWILIO_AUTH_TOKEN}`)}`,
+  };
+}
+
 function sqlClient(env) {
   if (!env.DATABASE_URL) throw new Error("DATABASE_URL is required");
   return neon(env.DATABASE_URL);
@@ -139,7 +174,11 @@ async function transcribeAudio(env, mediaId) {
   const isUrl = String(mediaId).startsWith("http://") || String(mediaId).startsWith("https://");
   const meta = isUrl ? { url: mediaId, mime_type: "audio/ogg" } : await mediaMetadata(env, mediaId);
   if (!meta.url) return "";
-  const headers = isUrl || !env.WHATSAPP_ACCESS_TOKEN ? {} : { authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}` };
+  const headers = isUrl
+    ? twilioMediaHeaders(env, meta.url)
+    : !env.WHATSAPP_ACCESS_TOKEN
+      ? {}
+      : { authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}` };
   const mediaResponse = await fetch(meta.url, { headers });
   if (!mediaResponse.ok) return "";
   const blob = await mediaResponse.blob();
@@ -644,12 +683,12 @@ async function handlePost(request, env) {
   return text("EVENT_RECEIVED");
 }
 
-function twilioMessageFromForm(form) {
-  const from = cleanText(form.get("From")).replace(/^whatsapp:/, "").replace(/^\+/, "");
-  const body = cleanText(form.get("Body"));
-  const mediaUrl = cleanText(form.get("MediaUrl0"));
-  const mediaType = cleanText(form.get("MediaContentType0"));
-  const messageSid = cleanText(form.get("MessageSid") || form.get("SmsMessageSid") || crypto.randomUUID());
+function twilioMessageFromParams(params) {
+  const from = cleanText(params.get("From")).replace(/^whatsapp:/, "").replace(/^\+/, "");
+  const body = cleanText(params.get("Body"));
+  const mediaUrl = cleanText(params.get("MediaUrl0"));
+  const mediaType = cleanText(params.get("MediaContentType0"));
+  const messageSid = cleanText(params.get("MessageSid") || params.get("SmsMessageSid") || crypto.randomUUID());
   return {
     id: `twilio:${messageSid}`,
     from,
@@ -657,8 +696,8 @@ function twilioMessageFromForm(form) {
     text: { body },
     image: mediaUrl ? { id: mediaUrl, mime_type: mediaType, caption: body } : undefined,
     audio: mediaUrl ? { id: mediaUrl, mime_type: mediaType, caption: body } : undefined,
-    document: mediaUrl ? { id: mediaUrl, mime_type: mediaType, filename: cleanText(form.get("MediaUrl0")).split("/").pop(), caption: body } : undefined,
-    twilio: Object.fromEntries(form.entries()),
+    document: mediaUrl ? { id: mediaUrl, mime_type: mediaType, filename: cleanText(params.get("MediaUrl0")).split("/").pop(), caption: body } : undefined,
+    twilio: Object.fromEntries(params.entries()),
   };
 }
 
@@ -674,11 +713,13 @@ function twimlResponse(body) {
 }
 
 async function handleTwilioPost(request, env) {
-  const form = await request.formData();
+  const rawBody = await request.text();
+  const params = new URLSearchParams(rawBody);
+  if (!(await verifyTwilioSignature(request, env, params))) return text("Invalid Twilio signature", 403);
   const sql = sqlClient(env);
   await ensureSchema(sql);
-  const message = twilioMessageFromForm(form);
-  const reply = await handleIncomingMessage(sql, env, cleanText(form.get("To")).replace(/^whatsapp:/, ""), message, { replyProvider: "twilio" });
+  const message = twilioMessageFromParams(params);
+  const reply = await handleIncomingMessage(sql, env, cleanText(params.get("To")).replace(/^whatsapp:/, ""), message, { replyProvider: "twilio" });
   return twimlResponse(reply || "Received.");
 }
 
