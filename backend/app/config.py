@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     notion_api_key: str | None = None
     notion_database_id: str | None = None
     notion_source_name: str = "Pearl Spytech New Projects"
-    notion_pearl_projects_page_id: str | None = None
+    notion_pearl_projects_page_id: str | None = "29a5c898ef91805c8f62caccbd26b0af"
     notion_analyze_lrm_page_id: str | None = "2995c898ef918040a360c467e4837e4c"
     notion_analyze_lrm_source_name: str = "Analyze the Property deals and update LRM"
     notion_brokerage_new_deals_page_id: str | None = "29a5c898ef91801598afdcf276fe057b"

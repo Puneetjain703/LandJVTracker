@@ -190,14 +190,27 @@ def _map_related_page(
     )
 
 
-def _resolve_database_id(client: Client, configured_id: str | None, source_name: str) -> str | None:
+def _search_notion_objects(client: Any, query: str, value: str) -> list[dict[str, Any]]:
+    return client.search(query=query, filter={"property": "object", "value": value}).get("results", [])
+
+
+def _resolve_database_id(client: Any, configured_id: str | None, source_name: str) -> str | None:
     if configured_id:
         return configured_id
-    result = client.search(query=source_name, filter={"property": "object", "value": "database"})
-    for item in result.get("results", []):
-        title = _plain_text(item.get("title")) if item.get("object") == "database" else None
-        if title == source_name:
-            return item["id"]
+    search_values = ("data_source", "database")
+    for search_value in search_values:
+        try:
+            results = _search_notion_objects(client, source_name, search_value)
+        except Exception as exc:
+            from notion_client.errors import APIResponseError
+
+            if isinstance(exc, APIResponseError) and exc.code == "validation_error":
+                continue
+            raise
+        for item in results:
+            title = _plain_text(item.get("title")) if item.get("object") in {"data_source", "database"} else None
+            if title == source_name:
+                return item["id"]
     return None
 
 
