@@ -90,6 +90,7 @@ DIRECT_MODE = APP_MODE in {"direct", "streamlit", "all_in_one", "all-in-one"}
 if DIRECT_MODE and not os.getenv("DATABASE_DRIVER"):
     os.environ["DATABASE_DRIVER"] = "psycopg"
 API_BASE_URL = resolve_api_base_url()
+PAGES = ["Dashboard", "Property Copilot", "WhatsApp", "Assets", "Brokerage", "People", "Add / Edit", "Approvals", "Import", "Export", "Sync"]
 ASSET_TYPES = ["", "land", "jv", "resale_unit", "commercial", "rental", "brokerage_listing", "other"]
 UPDATE_TYPES = ["note", "price_revision", "status_change", "sold", "follow_up", "site_visit", "legal", "document", "other"]
 CONTACT_ROLES = [
@@ -111,6 +112,23 @@ CONTACT_ROLES = [
 
 
 st.set_page_config(page_title="Land and JV Tracker", layout="wide", initial_sidebar_state="expanded")
+
+
+def query_param(name: str, default: str = "") -> str:
+    try:
+        value = st.query_params.get(name, default)
+    except Exception:
+        return default
+    if isinstance(value, list):
+        return str(value[0]) if value else default
+    return str(value or default)
+
+
+def query_int(name: str) -> int | None:
+    try:
+        return int(query_param(name))
+    except (TypeError, ValueError):
+        return None
 
 
 THEME_CSS = """
@@ -1069,6 +1087,11 @@ def asset_list_page(title: str = "Asset Desk", preset_filters: dict[str, Any] | 
         "Search, compare, open, edit, map, and update properties without hunting through workbook tabs.",
         ["Cards for scanning", "Table for sorting", "Every edit goes to Postgres"],
     )
+    linked_asset_id = query_int("asset_id") if title == "Asset Desk" else None
+    if linked_asset_id:
+        st.info(f"Opened from shared link: asset {linked_asset_id}")
+        asset_detail(linked_asset_id)
+        st.divider()
     filters, quick_search = asset_filters()
     filters.update(preset_filters or {})
     page_key = f"{title.lower().replace(' ', '_')}_page"
@@ -1696,11 +1719,22 @@ def approvals_page() -> None:
         "Turn raw Sheets and Notion leads into clean property records before they touch the confirmed database.",
         ["Bulk approve", "Classify lead type", "Edit before publish", "Source payload preserved"],
     )
-    status_filter = st.segmented_control("Queue status", ["pending", "approved", "rejected", "all"], default="pending") or "pending"
+    target_approval_id = query_int("approval_id")
+    status_options = ["pending", "approved", "rejected", "all"]
+    linked_status = query_param("status", "pending")
+    default_status = linked_status if linked_status in status_options else "pending"
+    status_filter = st.segmented_control("Queue status", status_options, default=default_status) or default_status
     rows = api("GET", "/approvals", params={"status": status_filter})
+    if target_approval_id and rows and target_approval_id not in [row["id"] for row in rows]:
+        all_rows = api("GET", "/approvals", params={"status": "all"})
+        target_rows = [row for row in all_rows if row["id"] == target_approval_id]
+        if target_rows:
+            rows = target_rows + [row for row in rows if row["id"] != target_approval_id]
     if not rows:
         empty_panel("No approval items in this status.")
         return
+    if target_approval_id:
+        st.info(f"Opened from shared link: approval #{target_approval_id}")
     pending_count = len([row for row in rows if row.get("status") == "pending"])
     source_count = len(set(row.get("source") for row in rows if row.get("source")))
     c0, c1, c2 = st.columns(3)
@@ -1764,6 +1798,7 @@ def approvals_page() -> None:
     selected_id = st.selectbox(
         "Open one item for detailed review/edit",
         [row["id"] for row in rows],
+        index=next((index for index, row in enumerate(rows) if row["id"] == target_approval_id), 0),
         format_func=lambda item_id: next(
             f"#{row['id']} · {row.get('title') or 'Untitled'} · {row['source']} · {row['status']}"
             for row in rows
@@ -2214,9 +2249,12 @@ def whatsapp_page() -> None:
         unsafe_allow_html=True,
     )
     c1, c2 = st.columns([1, 2])
+    whatsapp_status_options = ["", "received", "draft", "draft_updated", "queued", "answered", "updated_asset", "attached_document", "ignored", "failed"]
+    linked_status = query_param("status")
     status_filter = c1.selectbox(
         "Status",
-        ["", "received", "queued", "answered", "updated_asset", "attached_document", "ignored", "failed"],
+        whatsapp_status_options,
+        index=whatsapp_status_options.index(linked_status) if linked_status in whatsapp_status_options else 0,
         format_func=lambda value: "Any status" if value == "" else labelize(value),
     )
     limit = c2.slider("Rows", min_value=25, max_value=500, value=150, step=25)
@@ -2227,6 +2265,17 @@ def whatsapp_page() -> None:
         return
     if not rows:
         empty_panel("No WhatsApp messages logged yet. Deploy the Worker bridge, subscribe the webhook, then send a test message.")
+        return
+    target_approval_id = query_int("approval_id")
+    target_asset_id = query_int("asset_id")
+    if target_approval_id:
+        rows = [row for row in rows if row.get("approval_queue_id") == target_approval_id]
+        st.info(f"Opened from shared link: WhatsApp records for approval/draft #{target_approval_id}")
+    if target_asset_id:
+        rows = [row for row in rows if row.get("asset_id") == target_asset_id]
+        st.info(f"Opened from shared link: WhatsApp records for asset {target_asset_id}")
+    if not rows:
+        empty_panel("No WhatsApp messages matched this shared link filter.")
         return
     df = pd.DataFrame(rows)
     display_columns = [
@@ -2411,9 +2460,12 @@ def main() -> None:
     with st.sidebar:
         st.title("Land and JV")
         st.caption(f"Signed in as {st.session_state.get('username', 'internal')}")
+        linked_page = query_param("page", "Dashboard")
+        default_page_index = PAGES.index(linked_page) if linked_page in PAGES else 0
         page = st.radio(
             "Workspace",
-            ["Dashboard", "Property Copilot", "WhatsApp", "Assets", "Brokerage", "People", "Add / Edit", "Approvals", "Import", "Export", "Sync"],
+            PAGES,
+            index=default_page_index,
         )
         st.divider()
         st.caption("Daily flow: sync, approve, update, export.")

@@ -12,6 +12,7 @@ compatibility_date = "2026-06-05"
 # npx wrangler secret put TWILIO_ACCOUNT_SID
 # npx wrangler secret put TWILIO_AUTH_TOKEN
 # npx wrangler secret put TWILIO_WEBHOOK_URL
+# npx wrangler secret put APP_BASE_URL
 
 [vars]
 OPENAI_MODEL = "gpt-4.1-mini"
@@ -19,6 +20,8 @@ OPENAI_TRANSCRIPTION_MODEL = "whisper-1"
 AUTO_APPLY_EXISTING_ASSET_UPDATES = "true"
 REQUIRE_APPROVAL_FOR_NEW_ASSETS = "true"
 TWILIO_VALIDATE_SIGNATURE = "true"
+# Public Streamlit app URL. You can also set this as a secret instead.
+# APP_BASE_URL = "https://your-land-jv-tracker.streamlit.app"
 
 # Optional comma-separated allowlist in international format without +.
 # WHATSAPP_ALLOWED_SENDERS = "919999999999,918888888888"

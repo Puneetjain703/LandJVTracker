@@ -124,6 +124,7 @@ npx wrangler secret put WHATSAPP_ACCESS_TOKEN
 npx wrangler secret put WHATSAPP_PHONE_NUMBER_ID
 npx wrangler secret put WHATSAPP_APP_SECRET
 npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put APP_BASE_URL
 ```
 
 Optional sender allowlist:
@@ -164,9 +165,18 @@ OPENAI_TRANSCRIPTION_MODEL
 WHATSAPP_ALLOWED_SENDERS
 AUTO_APPLY_EXISTING_ASSET_UPDATES
 REQUIRE_APPROVAL_FOR_NEW_ASSETS
+APP_BASE_URL
 ```
 
 For `DATABASE_URL`, use the same Neon connection string that works for Streamlit.
+
+Set `APP_BASE_URL` to your public Streamlit app URL if you want WhatsApp replies to include contextual links back into the UI:
+
+```text
+https://YOUR-STREAMLIT-APP.streamlit.app
+```
+
+The bot only adds links when they are useful for the current action. Drafts link to WhatsApp Intake, confirmed leads link to Approval Inbox, and existing asset updates/documents link to the Asset Desk.
 
 ## Meta WhatsApp Cloud API
 
@@ -204,6 +214,7 @@ OPENAI_API_KEY
 TWILIO_ACCOUNT_SID
 TWILIO_AUTH_TOKEN
 TWILIO_WEBHOOK_URL
+APP_BASE_URL
 ```
 
 Recommended:

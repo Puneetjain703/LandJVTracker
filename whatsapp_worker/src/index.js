@@ -410,6 +410,40 @@ function actionHelpText() {
   ].join("\n");
 }
 
+function appBaseUrl(env) {
+  return cleanText(env.APP_BASE_URL || env.STREAMLIT_APP_URL || env.PUBLIC_APP_URL || "").replace(/\/+$/, "");
+}
+
+function appLink(env, page, params = {}) {
+  const base = appBaseUrl(env);
+  if (!base) return "";
+  const query = new URLSearchParams({ page, ...Object.fromEntries(Object.entries(params).filter(([, value]) => hasValue(value))) });
+  return `${base}/?${query.toString()}`;
+}
+
+function appendReferenceLink(env, responseText, context = {}) {
+  const intent = context.intent || "";
+  let url = "";
+  let label = "";
+  if (context.assetId && ["attach_document", "update_asset"].includes(intent)) {
+    url = appLink(env, "Assets", { asset_id: context.assetId });
+    label = "Open asset file";
+  } else if (context.approvalId && ["confirm_draft", "draft_new_lead", "start_draft", "start_collateral_draft", "update_draft", "draft_summary", "draft_already_active"].includes(intent)) {
+    if (intent === "confirm_draft") {
+      url = appLink(env, "Approvals", { approval_id: context.approvalId, status: "pending" });
+      label = "Open approval item";
+    } else {
+      url = appLink(env, "WhatsApp", { approval_id: context.approvalId, status: context.status || "draft" });
+      label = "Open WhatsApp intake log";
+    }
+  } else if (["attach_needs_asset", "update_needs_asset"].includes(intent)) {
+    url = appLink(env, "Assets");
+    label = "Open Asset Desk";
+  }
+  if (!url || !label || String(responseText || "").includes(url)) return responseText;
+  return `${responseText}\n\n${label}: ${url}`;
+}
+
 async function openAiJson(env, system, user) {
   if (!env.OPENAI_API_KEY) return null;
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -1053,6 +1087,8 @@ async function handleIncomingMessage(sql, env, phoneNumberId, message, options =
     errorMessage = error instanceof Error ? error.message : String(error);
     responseText = `WhatsApp bot hit an error: ${errorMessage.slice(0, 500)}`;
   }
+
+  responseText = appendReferenceLink(env, responseText, { intent, status, approvalId, assetId });
 
   await logMessage(sql, {
     wamid: extracted.wamid,
