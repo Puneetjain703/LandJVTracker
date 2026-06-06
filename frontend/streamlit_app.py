@@ -1857,6 +1857,23 @@ def sync_page() -> None:
         "Run Google Sheets and Notion listeners manually. The scheduled job runs the same combined sync at 7 AM and 7 PM.",
         ["Sheets", "Pearl Spytech", "Brokerage New Deals", "Deduped queue"],
     )
+    gs_ready = has_configured_value("GOOGLE_SERVICE_ACCOUNT_JSON") or has_configured_value("GOOGLE_SERVICE_ACCOUNT_FILE")
+    notion_ready = has_configured_value("NOTION_API_KEY")
+    with st.expander("Sync requirements", expanded=not (gs_ready and notion_ready)):
+        c1, c2 = st.columns(2)
+        c1.metric("Google Sheets credentials", "Ready" if gs_ready else "Missing")
+        c2.metric("Notion token", "Ready" if notion_ready else "Missing")
+        if not gs_ready:
+            st.warning(
+                "Google Sheets sync needs `GOOGLE_SERVICE_ACCOUNT_JSON` in Streamlit secrets, or "
+                "`GOOGLE_SERVICE_ACCOUNT_FILE` for local runs. On Streamlit Cloud, use the raw service account JSON."
+            )
+        if not notion_ready:
+            st.warning("Notion sync needs `NOTION_API_KEY` in Streamlit secrets.")
+        st.caption(
+            "Manual sync reads Streamlit secrets. Scheduled 7 AM / 7 PM sync reads GitHub Actions repository secrets, "
+            "so configure both places if you want both manual and automated ingestion."
+        )
     if st.button("Run all source listeners", use_container_width=True, type="primary"):
         try:
             with st.spinner("Running Google Sheets and Notion listeners. This can take a few minutes when Notion has many pages."):

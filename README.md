@@ -239,6 +239,29 @@ For Google Sheets, create a Google Cloud service account, put the JSON path in `
 
 For Notion project-page sync, the app reads only the configured project pages and their `Tasks` / `Notes` relation properties. The current project IDs are configured as `NOTION_PEARL_PROJECTS_PAGE_ID`, `NOTION_ANALYZE_LRM_PAGE_ID`, and `NOTION_BROKERAGE_NEW_DEALS_PAGE_ID`.
 
+For Streamlit Cloud manual sync, add these in **Streamlit app settings -> Secrets**:
+
+```toml
+NOTION_API_KEY = "ntn_your_notion_token"
+
+GOOGLE_SERVICE_ACCOUNT_JSON = '''
+{
+  "type": "service_account",
+  "project_id": "...",
+  "private_key_id": "...",
+  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  "client_email": "your-service-account@your-project.iam.gserviceaccount.com",
+  "client_id": "...",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "..."
+}
+'''
+```
+
+Also share the Google Sheet with the `client_email` from that JSON. For the 7 AM / 7 PM scheduled GitHub Actions sync, add the same `NOTION_API_KEY` and `GOOGLE_SERVICE_ACCOUNT_JSON` under **GitHub repo -> Settings -> Secrets and variables -> Actions -> Repository secrets**.
+
 Current Notion source links:
 
 - Pearl Spytech New Projects: https://www.notion.so/Pearl-Spytech-New-Projects-29a5c898ef91805c8f62caccbd26b0af
